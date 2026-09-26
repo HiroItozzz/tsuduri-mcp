@@ -19,10 +19,24 @@ uv run tsuduri-import path/to/conversations-000.zip
 claude mcp add tsuduri -- uv run --directory /path/to/tsuduri-mcp tsuduri-mcp
 ```
 
+## ツール
+
+| ツール | 用途 |
+|---|---|
+| `search_messages` | キーワード検索（部分一致。日本語可） |
+| `list_conversations` | 期間・タイトルで会話の一覧 |
+| `get_messages` | 会話の一部を読む |
+| `export_conversation` | 会話の全文を Markdown ファイルに書き出す |
+| `summarize_conversation` | Gemini で要約する（要約は保存して使い回す） |
+
+prompt として `summarize_with_claude` と `draft_blog_with_claude` もある（クライアント自身が要約・下書きをする）。
+
+要約には環境変数 `GEMINI_API_KEY` が必要。
+
 ## 開発
 
 ```bash
-uv run pytest
+uv run ruff check . && uv run ruff format . && uv run ty check && uv run pytest
 ```
 
 設計の判断は [docs/design.md](docs/design.md) にまとめている。

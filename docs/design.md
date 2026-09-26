@@ -79,16 +79,44 @@ AI のコンテキストを節約することを優先している。
 | `list_conversations` | 期間・タイトルで会話の一覧（例: 先週の会話） |
 | `get_messages` | 会話の index の範囲だけを読む |
 | `export_conversation` | 全文を Markdown ファイルに書き出して、パスだけを返す |
+| `summarize_conversation` | Gemini で1本の枝を要約する。要約は保存して使い回す |
+
+MCP の prompt（クライアント自身に読ませて書かせるための指示書）も2つある。
+
+| prompt | 用途 |
+|---|---|
+| `summarize_with_claude` | クライアント自身が会話を読んで要約する。形式は `prompts/summary.md` |
+| `draft_blog_with_claude` | クライアント自身がブログの下書きを書く。指示は `prompts/blog.md`（cha2hatena の config.yaml から移した）。投稿はしない |
 
 - **戻り値はテキスト**（`structured_output=False`）。構造化出力にすると、同じ内容がインデントつき JSON の文字列と構造化データの両方で送られるため。キー名のくり返しや改行のエスケープもなくなる
 - 検索結果は1件ごとに `conversation=<uuid> index=<n>`、発言者、日時、タイトル、本文。長い本文は、最初に当たったキーワードのまわりを `max_chars` 文字だけ切り出し、何文字目かを添える。続きは `get_messages` で読む
 - 件数の多い結果は「N 件中 a〜b 件目（続きは offset=…）」と書き、AI が続きを取りに行けるようにする
 - 一覧の期間は「期間中にやりとりのあった会話」（作成が期間の終わりより前、かつ最終更新が期間の始まり以降）。タイトルが空の会話（新エクスポートで 219 件）は、最初の発言の冒頭を添える
 - 日付の引数はローカル時刻の `YYYY-MM-DD` か ISO 8601。`until` に日付だけを渡すと、その日を含む。表示もローカル時刻
-- 枝分かれした会話は全部の枝を index 順に並べ、直前以外のメッセージへの返信に「分岐」と表示する
+- 枝分かれした会話は、既定で1本の枝だけを扱う（下記）。`all_branches=true` なら全部の枝を index 順に並べ、直前以外のメッセージへの返信に「分岐」と表示する
 - `export_conversation` は、AI がファイルを読めるクライアント（Claude Code など）向け。書き出し先は一時ディレクトリの `tsuduri-mcp/<uuid>.md`。uuid は DB に存在することを確かめてからファイル名に使う
 - DB がないときは、取り込みのコマンドを案内するエラーにする
 - サーバーの `instructions` に、ツールの使い分けを書いている
+
+## 枝分かれ
+
+407 会話で、編集や再生成による枝分かれがある。枝をすべて並べると同じような内容が重なる（本線に入るのは平均 86%）ので、ツールは既定で1本の枝（線）だけを扱う。
+
+- `through_index=k` で「index k を通る線」を選ぶ。k より前は親をたどり、k より後は子孫のうちいちばん新しいメッセージまでたどる。検索で当たった index をそのまま渡せば、その枝が読める
+- 省くと、会話でいちばん新しいメッセージを通る線（本線）
+- 最初の発言を編集した会話では根が複数ある。線は終点から親をたどるので、そのまま扱える
+- ブログに投稿した範囲の記録（P2）も、線の上のメッセージ単位で持つ予定。こうすると、枝分かれと「投稿後に続いた会話」を同じ仕組みで扱える（まだ記事にしていない部分だけを下書きにする）
+
+## 要約（LLM）
+
+- pydantic-ai を通して Gemini（`gemini-3-flash-preview`）を呼ぶ。LiteLLM は `openai<3`・httpx（旧）を要求し、mcp の httpx2 と食い違うので使わない
+- API キーは `GEMINI_API_KEY` を明示して渡す。pydantic-ai は `GOOGLE_API_KEY` を優先して読むため、別のキーが黙って使われないようにした。見えないときはキー名を出すエラーにする
+- 要約は `summaries` テーブルに保存する。キーは「範囲の最初と最後のメッセージ・種類・モデル・プロンプトのハッシュ」。プロンプトを直すと作り直しになる。`refresh=true` で強制的に作り直す
+- 要約の形式は `prompts/summary.md`。話題ごとに `[index=12]` を付けさせ、原文を `get_messages` で読みに行けるようにしている
+- 入力は本線の本文を index つきで並べたもの。いちばん長い会話でも約 36 万文字で、Gemini Flash の入力上限に収まる。60 万文字を超えたら `start` でしぼるようにエラーにする
+- 実測: 70 件の会話で入力 1.8 万トークン・約 12 秒。保存済みなら 0.02 秒
+- テストでは `server.make_model` を pydantic-ai の `FunctionModel` に差し替え、通信しない
+- stdout を汚さないことを確認済み: pydantic-ai の初回バナー（stderr）は `BANNER_ENABLED = False` で止め、google-genai の AFC の警告は logging 経由で stderr に1回だけ出る
 
 ## 開発ツール
 
@@ -96,7 +124,10 @@ ruff（リント・整形）と ty（型チェック）。`uv run ruff check . &
 
 ## 未決定
 
-- 要約（Gemini / DeepSeek）と投稿のツール。cha2hatena の `llm/` と `blog/` を移す
+- P2: Gemini でのブログ下書き（`draft_blog_post`）、`posts` / `post_messages` テーブル、まだ記事にしていない部分の計算、一覧と検索への「投稿済み」表示
+- P3: はてなポスターを httpx2 で移植し、既定は下書き投稿。投稿を `posts` に記録する。そのあと Qiita / Dev.to
+- DeepSeek / OpenAI（pydantic-ai ならモデル名を足すだけ）、料金の表示
+- エクスポート JSON の読み込みを pydantic のモデルで検証する（形式が増えたときに、どの項目がおかしいかをわかるようにする）
 - 定期的な取り込みの方法
 - projects テーブル
 - thinking やツールの入出力も検索対象にするか（`raw_content` に残っている）
