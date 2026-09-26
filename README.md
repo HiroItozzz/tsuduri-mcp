@@ -10,14 +10,32 @@ claude.ai の「データのエクスポート」で手に入る `conversations-
 uv run tsuduri-import path/to/conversations-000.zip
 ```
 
-- 取り込み先は `data/tsuduri.db`。環境変数 `TSUDURI_DB` か `--db` で変えられる
+- 取り込み先は、ユーザーのデータ置き場の `tsuduri.db`（Linux は `~/.local/share/tsuduri-mcp/`、Windows は `%LOCALAPPDATA%\tsuduri-mcp\`）。環境変数 `TSUDURI_DB` か `--db` で変えられる
+- ログは同じ場所の `logs/tsuduri.log`（`TSUDURI_LOG` で変えられる）
 - 何度取り込んでも重複しない。新しいエクスポートを取り込むと、続きのある会話が更新される
 
 ## MCP サーバーの登録
 
+Claude Code:
+
 ```bash
-claude mcp add tsuduri -- uv run --directory /path/to/tsuduri-mcp tsuduri-mcp
+claude mcp add tsuduri -- uv run --directory /path/to/tsuduri-mcp --env-file /path/to/tsuduri-mcp/.env tsuduri-mcp
 ```
+
+Claude デスクトップ（`claude_desktop_config.json`）:
+
+```json
+{
+  "mcpServers": {
+    "tsuduri": {
+      "command": "uv",
+      "args": ["run", "--directory", "C:\\path\\to\\tsuduri-mcp", "--env-file", "C:\\path\\to\\tsuduri-mcp\\.env", "tsuduri-mcp"]
+    }
+  }
+}
+```
+
+`.env` には `GEMINI_API_KEY` と、はてなの `HATENA_ENTRY_URL`・`HATENA_CONSUMER_KEY`・`HATENA_CONSUMER_SECRET`・`HATENA_ACCESS_TOKEN`・`HATENA_ACCESS_TOKEN_SECRET` を書く。
 
 ## ツール
 

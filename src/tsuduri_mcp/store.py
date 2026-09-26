@@ -8,8 +8,7 @@ from typing import Literal
 
 from .dates import now_db
 from .models import Conversation, Message
-
-DEFAULT_DB_PATH = "data/tsuduri.db"  # 相対パスは cwd 基準。MCP は `uv run --directory` で起動する前提
+from .paths import data_dir
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS conversations (
@@ -113,7 +112,7 @@ FTS_MIN_CHARS = 3
 
 
 def default_db_path() -> Path:
-    return Path(os.environ.get("TSUDURI_DB", DEFAULT_DB_PATH))
+    return Path(os.environ.get("TSUDURI_DB") or data_dir() / "tsuduri.db")
 
 
 def connect(path: Path | str) -> sqlite3.Connection:

@@ -28,3 +28,7 @@ assets/
 
 # ログ
 logs/
+
+# DB とログの置き場所（~/.local/share/tsuduri-mcp）へのシンボリックリンク
+/data
+/logs

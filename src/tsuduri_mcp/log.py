@@ -12,8 +12,9 @@ import logging.handlers
 import os
 from pathlib import Path
 
+from .paths import data_dir
+
 LOGGER_NAME = "tsuduri_mcp"
-DEFAULT_LOG_PATH = "logs/tsuduri.log"
 MAX_BYTES = 1_000_000  # 1MB
 BACKUP_COUNT = 5
 
@@ -23,10 +24,10 @@ logger = logging.getLogger(LOGGER_NAME)
 def setup_logging() -> None:
     """`tsuduri_mcp` ロガーに RotatingFileHandler を1つだけ付ける。
 
-    ファイルは既定で `logs/tsuduri.log`（cwd 基準）。環境変数 `TSUDURI_LOG` で変えられる。
+    ファイルは既定で data_dir() の下の `logs/tsuduri.log`。環境変数 `TSUDURI_LOG` で変えられる。
     Claude Code などクライアントごとにプロセスが立つので、書式に %(process)d を入れて見分けられるようにする。
     """
-    path = Path(os.environ.get("TSUDURI_LOG", DEFAULT_LOG_PATH))
+    path = Path(os.environ.get("TSUDURI_LOG") or data_dir() / "logs" / "tsuduri.log")
     path.parent.mkdir(parents=True, exist_ok=True)
     handler = logging.handlers.RotatingFileHandler(path, maxBytes=MAX_BYTES, backupCount=BACKUP_COUNT, encoding="utf-8")
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s [%(process)d] %(name)s: %(message)s"))

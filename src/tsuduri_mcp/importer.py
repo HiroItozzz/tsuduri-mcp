@@ -8,7 +8,7 @@ from .store import ConversationStore, connect, default_db_path
 def main() -> None:
     parser = argparse.ArgumentParser(description="claude.ai のエクスポートを SQLite に取り込む")
     parser.add_argument("path", type=Path, help="conversations.json、またはそれを含む zip")
-    parser.add_argument("--db", type=Path, default=None, help="取り込み先（既定: $TSUDURI_DB または data/tsuduri.db）")
+    parser.add_argument("--db", type=Path, default=None, help="取り込み先（既定: $TSUDURI_DB かデータ置き場）")
     args = parser.parse_args()
 
     db_path = args.db or default_db_path()
