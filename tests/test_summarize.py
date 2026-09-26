@@ -101,6 +101,57 @@ def test_too_long_conversation_is_error(gemini, monkeypatch):
     assert gemini.prompts == []
 
 
+def test_transcript_version_bump_invalidates_cache(gemini, monkeypatch):
+    # render_transcript の形が変わったとみなして版を上げると、保存済みの要約を使い回さない
+    summarize()
+
+    monkeypatch.setattr(server, "TRANSCRIPT_VERSION", server.TRANSCRIPT_VERSION + 1)
+    result = summarize()
+
+    assert len(gemini.prompts) == 2
+    assert "テストの要約 2 回目" in result
+
+
+@pytest.fixture
+def gemini_branchy(tmp_path, monkeypatch):
+    #  m0 ─ m1 ─ m2old            （古い枝）
+    #            └ m2new          （こちらが新しい）
+    msgs = [
+        raw_message("m0", text="最初のテストの質問", created_at="2026-01-01T00:00:00.000000Z"),
+        raw_message(
+            "m1", sender="assistant", text="最初のテストの答え", parent="m0", created_at="2026-01-01T00:01:00.000000Z"
+        ),
+        raw_message("m2old", text="古い枝の質問", parent="m1", created_at="2026-01-01T00:02:00.000000Z"),
+        raw_message("m2new", text="新しい枝の質問", parent="m1", created_at="2026-01-01T00:03:00.000000Z"),
+    ]
+    src = tmp_path / "conversations.json"
+    src.write_text(json.dumps([raw_conversation("c1", msgs)], ensure_ascii=False), encoding="utf-8")
+    path = tmp_path / "tsuduri.db"
+    conn = connect(path)
+    ConversationStore(conn).import_conversations(ClaudeExportSource(src).load())
+    conn.close()
+    monkeypatch.setenv("TSUDURI_DB", str(path))
+    fake = FakeGemini()
+    monkeypatch.setattr(server, "make_model", fake.model)
+    return fake
+
+
+def test_different_branches_are_summarized_and_cached_separately(gemini_branchy):
+    main_result = summarize()  # 既定は新しい枝（m2new）を通る本線
+    other_result = summarize(through_index=2)  # index=2 は古い枝（m2old）
+
+    assert len(gemini_branchy.prompts) == 2  # 枝ごとに別のキーなので、どちらも Gemini を呼ぶ
+
+    # もう一度呼んでも、それぞれ自分の保存済み結果を返す
+    again_main = summarize()
+    again_other = summarize(through_index=2)
+
+    assert len(gemini_branchy.prompts) == 2
+    assert "保存済み" in again_main
+    assert "保存済み" in again_other
+    assert main_result != other_result
+
+
 def test_missing_api_key_is_clear_error(monkeypatch):
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
 

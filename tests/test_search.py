@@ -101,6 +101,39 @@ def test_search_keyword_with_fts_syntax_is_literal(store):
     assert store.search_messages(['"AND OR*']).total == 0
 
 
+def test_short_keyword_escapes_like_wildcards(tmp_path):
+    # "_" は LIKE のワイルドカード（任意の1文字）。エスケープしていないと、どんな1文字にも当たってしまう
+    conversations = [
+        raw_conversation(
+            "c",
+            [
+                raw_message("m0", text="foo_x bar", created_at=at(1)),  # 文字どおりの "_x" を含む
+                raw_message("m1", sender="assistant", text="foo9x bar", parent="m0", created_at=at(1, 1)),
+            ],
+        )
+    ]
+    path = tmp_path / "conversations.json"
+    path.write_text(json.dumps(conversations, ensure_ascii=False), encoding="utf-8")
+    conn = connect(":memory:")
+    s = ConversationStore(conn)
+    s.import_conversations(ClaudeExportSource(path).load())
+
+    assert found(s.search_messages(["_x"])) == [("c", 0)]  # m1 の "9x" には当たらない
+    conn.close()
+
+
+def test_short_keyword_escapes_backslash(tmp_path):
+    conversations = [raw_conversation("c", [raw_message("m0", text="path\\x here", created_at=at(1))])]
+    path = tmp_path / "conversations.json"
+    path.write_text(json.dumps(conversations, ensure_ascii=False), encoding="utf-8")
+    conn = connect(":memory:")
+    s = ConversationStore(conn)
+    s.import_conversations(ClaudeExportSource(path).load())
+
+    assert found(s.search_messages(["\\x"])) == [("c", 0)]
+    conn.close()
+
+
 # --- list_conversations ---
 
 
@@ -109,6 +142,14 @@ def test_list_by_period_uses_message_times(store):
     assert [c.uuid for c in store.list_conversations(since=at(2), until=at(3)).items] == ["c-python"]
     assert [c.uuid for c in store.list_conversations(since=at(5), until=at(15)).items] == ["c-blog"]
     assert store.list_conversations(since=at(15), until=at(25)).total == 0
+
+
+def test_list_with_only_since(store):
+    assert [c.uuid for c in store.list_conversations(since=at(5)).items] == ["c-blog"]
+
+
+def test_list_with_only_until(store):
+    assert [c.uuid for c in store.list_conversations(until=at(3)).items] == ["c-python"]
 
 
 def test_list_shows_first_human_text_and_counts(store):
@@ -124,6 +165,25 @@ def test_list_shows_first_human_text_and_counts(store):
 
 def test_list_by_title(store):
     assert [c.uuid for c in store.list_conversations(title="python").items] == ["c-python"]
+
+
+def test_list_orders_by_last_message_not_conversation_updated_at(tmp_path):
+    # renamed-only はタイトル変更だけで updated_at が新しくなった会話。発言は really-active より古い
+    conversations = [
+        raw_conversation("renamed-only", [raw_message("r0", text="質問", created_at=at(5))], updated_at=at(30)),
+        raw_conversation("really-active", [raw_message("q0", text="質問", created_at=at(8))], updated_at=at(8)),
+    ]
+    path = tmp_path / "conversations.json"
+    path.write_text(json.dumps(conversations, ensure_ascii=False), encoding="utf-8")
+    conn = connect(":memory:")
+    s = ConversationStore(conn)
+    s.import_conversations(ClaudeExportSource(path).load())
+
+    page = s.list_conversations()
+
+    assert [c.uuid for c in page.items] == ["really-active", "renamed-only"]
+    assert page.items[0].last_message_at == at(8)
+    conn.close()
 
 
 # --- get_messages ---
@@ -192,3 +252,22 @@ def test_line_unknown_index_is_error(branchy):
 
 def test_line_of_empty_conversation(store):
     assert store.get_line("存在しないテストの会話").messages == []
+
+
+def test_line_with_two_roots_takes_the_newest_root(tmp_path):
+    #  a0 ─ a1                    （元の発言）
+    #  b0 ─ b1                    （a0 を編集して作った、別の根。こちらが新しい）
+    msgs = [
+        raw_message("a0", text="最初の質問", created_at=at(1, 0)),
+        raw_message("a1", sender="assistant", text="最初の答え", parent="a0", created_at=at(1, 1)),
+        raw_message("b0", text="言い直した質問", created_at=at(1, 2)),
+        raw_message("b1", sender="assistant", text="新しい根の答え", parent="b0", created_at=at(1, 3)),
+    ]
+    path = tmp_path / "conversations.json"
+    path.write_text(json.dumps([raw_conversation("c", msgs)], ensure_ascii=False), encoding="utf-8")
+    conn = connect(":memory:")
+    s = ConversationStore(conn)
+    s.import_conversations(ClaudeExportSource(path).load())
+
+    assert uuids(s.get_line("c")) == ["b0", "b1"]
+    conn.close()

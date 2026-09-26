@@ -81,5 +81,23 @@ def test_older_export_does_not_overwrite(store, tmp_path):
     assert store.get_conversation("c1").name == "テストの新しい名前"
 
 
+def test_older_export_still_adds_its_own_messages(store, tmp_path):
+    # 新しいエクスポート → 古いエクスポートの順で取り込んでも、古いほうにしかないメッセージは入る
+    newer = two_turns()
+    newer["updated_at"] = NEW
+    newer["name"] = "テストの新しい名前"
+    import_raw(store, tmp_path, [newer])
+    older = two_turns()
+    older["chat_messages"].append(raw_message("m3", text="古いエクスポートだけのメッセージ", parent="m2"))
+
+    result = import_raw(store, tmp_path, [older])
+
+    assert result.unchanged == 1
+    assert result.messages_added == 1
+    conv = store.get_conversation("c1")
+    assert conv.name == "テストの新しい名前"  # 会話の名前は新しいほうのまま
+    assert [m.uuid for m in conv.messages] == ["m1", "m2", "m3"]
+
+
 def test_unknown_conversation_is_none(store):
     assert store.get_conversation("存在しないテストの会話") is None

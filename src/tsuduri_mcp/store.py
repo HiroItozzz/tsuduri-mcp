@@ -107,6 +107,7 @@ class ConversationSummary:
     message_count: int
     text_message_count: int  # 本文のあるメッセージの数。エクスポートに本文が含まれない会話がある
     first_human_text: str  # タイトルが空の会話を見分けるため
+    last_message_at: str  # 最後のメッセージの created_at。メッセージが0件なら updated_at
 
 
 @dataclass
@@ -200,12 +201,13 @@ class ConversationStore:
                 row = self.conn.execute("SELECT updated_at FROM conversations WHERE uuid = ?", (conv.uuid,)).fetchone()
                 if row is None:
                     result.added += 1
+                    self._upsert_conversation(conv)
                 elif conv.updated_at > row[0]:  # 日時はすべて同じ ISO 形式なので文字列のまま比べられる
                     result.updated += 1
+                    self._upsert_conversation(conv)
                 else:
                     result.unchanged += 1
-                    continue
-                self._upsert_conversation(conv)
+                # 会話が unchanged でも、そのエクスポートにしかないメッセージがあるかもしれないので必ず入れる
                 result.messages_added += self._insert_messages(conv)
         return result
 
@@ -320,9 +322,12 @@ class ConversationStore:
                            AS text_message_count,
                        coalesce((SELECT m.text FROM messages m
                                  WHERE m.conversation_uuid = c.uuid AND m.sender = 'human' AND m.text != ''
-                                 ORDER BY m.position LIMIT 1), '') AS first_human_text
+                                 ORDER BY m.position LIMIT 1), '') AS first_human_text,
+                       coalesce((SELECT m.created_at FROM messages m
+                                 WHERE m.conversation_uuid = c.uuid
+                                 ORDER BY m.position DESC LIMIT 1), c.updated_at) AS last_message_at
                 FROM conversations c WHERE {where.sql}
-                ORDER BY c.updated_at {_direction(order)}
+                ORDER BY last_message_at {_direction(order)}
                 LIMIT ? OFFSET ?""",
             [*where.params, limit, offset],
         ).fetchall()

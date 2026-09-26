@@ -65,7 +65,7 @@ def render_conversation_list(page: Page[ConversationSummary], offset: int) -> st
     for c in page.items:
         lines.append(
             f"- {c.uuid} | {conversation_title(c.name, c.first_human_text)} | "
-            f"作成 {db_to_local(c.created_at)} / 更新 {db_to_local(c.updated_at)} | {c.message_count} 件"
+            f"作成 {db_to_local(c.created_at)} / 最終発言 {db_to_local(c.last_message_at)} | {c.message_count} 件"
             + (
                 " | 本文なし（エクスポートに本文が含まれていない）"
                 if c.message_count and not c.text_message_count
@@ -94,7 +94,11 @@ class Scope:
 
 def branch_note(pm: PositionedMessage, scope: Scope) -> str:
     # 1本の線では親はいつも直前なので、すべての枝を並べたときだけ表示する
-    if scope.all_branches and pm.parent_position is not None and pm.parent_position != pm.position - 1:
+    if not scope.all_branches:
+        return ""
+    if pm.parent_position is None:
+        return "新しい根（最初の発言の編集）" if pm.position != 0 else ""
+    if pm.parent_position != pm.position - 1:
         return f"index={pm.parent_position} への返信（分岐）"
     return ""
 

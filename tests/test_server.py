@@ -45,6 +45,16 @@ def test_search_returns_conversation_and_index_with_excerpt():
     assert len(result) < 500
 
 
+def test_search_rejects_one_char_keyword():
+    with pytest.raises(ValueError, match="2文字以上"):
+        server.search_messages(["あ"])
+
+
+def test_search_rejects_one_char_exclude():
+    with pytest.raises(ValueError, match="2文字以上"):
+        server.search_messages(["テスト"], exclude=["あ"])
+
+
 def test_list_conversations():
     assert "c1 | つづりちゃんのテスト会話" in server.list_conversations()
 
@@ -83,6 +93,27 @@ def test_export_writes_full_text_to_file():
     path = Path(result.split(" に書き出しました")[0])
     assert LONG in path.read_text(encoding="utf-8")
     assert LONG not in result
+
+
+def test_export_filenames_differ_by_branch_so_they_do_not_overwrite():
+    result_all = server.export_conversation("c1", all_branches=True)
+    result_main = server.export_conversation("c1")
+    result_branch = server.export_conversation("c1", through_index=1)
+
+    def name_of(result):
+        return Path(result.split(" に書き出しました")[0]).name
+
+    assert name_of(result_all) == "c1-all.md"
+    assert name_of(result_main) == "c1-to2.md"  # 本線は index=2 で終わる
+    assert name_of(result_branch) == "c1-to1.md"  # 古い枝は index=1 で終わる
+
+
+def test_all_branches_and_through_index_together_is_error():
+    with pytest.raises(ValueError):
+        server.get_messages("c1", through_index=1, all_branches=True)
+
+    with pytest.raises(ValueError):
+        server.export_conversation("c1", through_index=1, all_branches=True)
 
 
 def test_unknown_conversation_is_error():

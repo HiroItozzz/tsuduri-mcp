@@ -1,6 +1,6 @@
 import hashlib
 import tempfile
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import Annotated, Literal
@@ -47,7 +47,7 @@ mcp = MCPServer("tsuduri", instructions=INSTRUCTIONS)
 
 # 期間の引数の説明は共通
 Since = Annotated[str | None, Field(description="この日時以降（YYYY-MM-DD はその日の 0 時から）")]
-Until = Annotated[str | None, Field(description="この日時まで（YYYY-MM-DD はその日を含む）")]
+Until = Annotated[str | None, Field(description="この日時の手前まで（YYYY-MM-DD はその日を含む）")]
 
 
 @contextmanager
@@ -68,9 +68,17 @@ def find_conversation(store: ConversationStore, conversation_uuid: str) -> Conve
     return found[0]
 
 
+def _check_keyword_lengths(words: Sequence[str]) -> None:
+    for w in words:
+        if len("".join(w.split())) <= 1:  # 空白を除いて1文字以下
+            raise ValueError(f"キーワードは2文字以上にしてください: {w!r}")
+
+
 @mcp.tool(structured_output=False)
 def search_messages(
-    keywords: Annotated[list[str], Field(description="探す言葉。部分一致で、大文字・小文字は区別しない")],
+    keywords: Annotated[
+        list[str], Field(description="探す言葉（2文字以上）。部分一致で、英字（半角）の大文字・小文字は区別しない")
+    ],
     match: Annotated[Literal["all", "any"], Field(description="all: すべて含む / any: どれかを含む")] = "all",
     exclude: Annotated[list[str] | None, Field(description="この言葉を含むメッセージは除く")] = None,
     sender: Annotated[Literal["human", "assistant"] | None, Field(description="発言者で絞る")] = None,
@@ -88,7 +96,10 @@ def search_messages(
 
     当たったメッセージごとに、会話の uuid・メッセージの index・発言者・日時・会話のタイトルと本文を返す。
     本文は text の部分だけで、thinking やツールの入出力は含まない。
+    keywords が空なら、条件に合うすべてのメッセージを返す（期間で眺めるときに使う）。
     """
+    _check_keyword_lengths(keywords)
+    _check_keyword_lengths(exclude or ())
     with open_store() as store:
         page = store.search_messages(
             keywords,
@@ -110,11 +121,11 @@ def list_conversations(
     since: Since = None,
     until: Until = None,
     title: Annotated[str | None, Field(description="タイトルに含まれる言葉")] = None,
-    order: Annotated[Literal["newest", "oldest"], Field(description="最終更新の順")] = "newest",
+    order: Annotated[Literal["newest", "oldest"], Field(description="最終発言の順")] = "newest",
     limit: Annotated[int, Field(ge=1, le=MAX_LIMIT)] = 50,
     offset: Annotated[int, Field(ge=0)] = 0,
 ) -> str:
-    """会話の一覧を返す（uuid・タイトル・作成日時・最終更新日時・メッセージ数）。
+    """会話の一覧を返す（uuid・タイトル・作成日時・最終発言日時・メッセージ数）。
 
     期間は「その期間に発言のあった会話」で絞る。期間より前に始まって期間中に続きを話した会話も含む。
     タイトルが空の会話は、最初の発言の冒頭を代わりに表示する。
@@ -143,6 +154,8 @@ AllBranches = Annotated[bool, Field(description="true なら枝を選ばず、�
 def load_scope(
     store: ConversationStore, conversation_uuid: str, through_index: int | None, all_branches: bool
 ) -> render.Scope:
+    if all_branches and through_index is not None:
+        raise ValueError("all_branches と through_index は同時に指定できません")
     if all_branches:
         messages = store.get_messages(conversation_uuid)
         leaf_count = store.get_line(conversation_uuid).leaf_count
@@ -189,9 +202,14 @@ def export_conversation(
         scope = load_scope(store, conversation_uuid, through_index, all_branches)
     text = render.render_markdown(info, scope, include_details)
     EXPORT_DIR.mkdir(parents=True, exist_ok=True)
-    path = EXPORT_DIR / f"{conversation_uuid}.md"
+    # 枝ごとにファイルを分け、書き出すたびに他の枝を上書きしないようにする
+    suffix = "all" if all_branches else f"to{scope.messages[-1].position if scope.messages else 0}"
+    path = EXPORT_DIR / f"{conversation_uuid}-{suffix}.md"
     path.write_text(text, encoding="utf-8")
     return f"{path} に書き出しました（{len(scope.messages)} 件、{len(text)} 文字、{text.count(chr(10))} 行）"
+
+
+TRANSCRIPT_VERSION = 1  # render_transcript（会話ログの形）を変えたら、この数字を上げてキャッシュを作り直させる
 
 
 def prompt_hash(text: str) -> str:
@@ -216,7 +234,7 @@ def load_transcript(
 async def summarize_conversation(
     conversation_uuid: str,
     through_index: ThroughIndex = None,
-    start: Annotated[int, Field(ge=0, description="この index 以降だけを要約する")] = 0,
+    start: Annotated[int, Field(ge=0, description="この index 以降だけを要約する（選んだ枝の上の index）")] = 0,
     refresh: Annotated[bool, Field(description="保存済みの要約があっても作り直す")] = False,
 ) -> str:
     """会話の1本の枝を Gemini で要約する。
@@ -234,7 +252,7 @@ async def summarize_conversation(
         last_message_uuid=messages[-1].message.uuid,
         kind="summary",
         model=SUMMARY_MODEL,
-        prompt_hash=prompt_hash(instructions),
+        prompt_hash=prompt_hash(f"{TRANSCRIPT_VERSION}\n{instructions}"),
     )
     if not refresh:
         with open_store() as store:
@@ -253,7 +271,9 @@ async def summarize_conversation(
 async def draft_blog_post(
     conversation_uuid: str,
     through_index: ThroughIndex = None,
-    start: Annotated[int, Field(ge=0, description="この index 以降だけを下書きの材料にする")] = 0,
+    start: Annotated[
+        int, Field(ge=0, description="この index 以降だけを下書きの材料にする（選んだ枝の上の index）")
+    ] = 0,
     refresh: Annotated[bool, Field(description="保存済みの下書きがあっても作り直す")] = False,
 ) -> str:
     """Gemini でブログの下書き（タイトル・本文・カテゴリー）を作る。投稿はしない。
@@ -269,7 +289,7 @@ async def draft_blog_post(
         last_message_uuid=messages[-1].message.uuid,
         kind="blog_draft",
         model=DRAFT_MODEL,
-        prompt_hash=prompt_hash(instructions),
+        prompt_hash=prompt_hash(f"{TRANSCRIPT_VERSION}\n{instructions}"),
     )
     if not refresh:
         with open_store() as store:
