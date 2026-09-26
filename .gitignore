@@ -19,3 +19,6 @@ assets/
 *.db-shm
 *.sqlite
 *.sqlite3
+
+# Claude Code の個人設定
+.claude/settings.local.json
