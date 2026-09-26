@@ -9,6 +9,7 @@ authors = [
 requires-python = ">=3.13"
 dependencies = [
     "mcp>=2.2.0",
+    "pydantic-ai-slim[google]>=2.51.0",
 ]
 
 [project.scripts]
@@ -35,3 +36,9 @@ select = ["E", "F", "I", "B", "UP"]
 
 [tool.ruff.lint.isort]
 known-local-folder = ["claude_export"]
+
+[tool.pytest.ini_options]
+filterwarnings = [
+    # google-genai 内部の Python 3.17 向けの非推奨警告。こちらのコードの問題ではない
+    "ignore:'_UnionGenericAlias' is deprecated:DeprecationWarning:google.genai",
+]
