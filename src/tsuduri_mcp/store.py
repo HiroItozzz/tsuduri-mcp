@@ -174,7 +174,7 @@ class MessageHit:
 
 
 @dataclass
-class ConversationSummary:
+class ConversationInfo:
     uuid: str
     name: str
     created_at: str
@@ -544,7 +544,7 @@ class ConversationStore:
         order: Literal["newest", "oldest"] = "newest",
         limit: int = 50,
         offset: int = 0,
-    ) -> Page[ConversationSummary]:
+    ) -> Page[ConversationInfo]:
         """期間にやりとりのあった会話（since 以上 until 未満に作られたメッセージがある会話）を返す。
 
         会話の updated_at は、タイトルの変更などメッセージのない操作でも新しくなるので、期間の判定には使わない。
@@ -585,7 +585,7 @@ class ConversationStore:
                 LIMIT ? OFFSET ?""",
             [*where.params, limit, offset],
         ).fetchall()
-        return Page(total, [ConversationSummary(**row) for row in rows])
+        return Page(total, [ConversationInfo(**row) for row in rows])
 
     def get_messages(self, conversation_uuid: str, start: int = 0, count: int | None = None) -> list[PositionedMessage]:
         rows = self.conn.execute(

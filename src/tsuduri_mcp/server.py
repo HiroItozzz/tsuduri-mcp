@@ -18,8 +18,8 @@ from pydantic_ai.models import Model
 from . import blog, llm, log, render
 from .dates import now_db, since_to_db, until_to_db
 from .store import (
+    ConversationInfo,
     ConversationStore,
-    ConversationSummary,
     Line,
     PositionedMessage,
     Summary,
@@ -145,7 +145,7 @@ def open_store() -> Iterator[ConversationStore]:
         yield ConversationStore(conn)
 
 
-def find_conversation(store: ConversationStore, conversation_uuid: str) -> ConversationSummary:
+def find_conversation(store: ConversationStore, conversation_uuid: str) -> ConversationInfo:
     found = store.list_conversations(uuid=conversation_uuid, limit=1).items
     if not found:
         raise ValueError(f"会話が見つかりません: {conversation_uuid}")
@@ -308,7 +308,7 @@ def prompt_hash(text: str) -> str:
 
 def load_transcript(
     store: ConversationStore, conversation_uuid: str, line: Line, start: int
-) -> tuple[ConversationSummary, list[PositionedMessage], str]:
+) -> tuple[ConversationInfo, list[PositionedMessage], str]:
     """すでに開いた store と、すでに選んだ線（line）から、LLM に渡す会話ログを作る。
 
     line.messages のうち position >= start のものだけを使う。

@@ -10,7 +10,7 @@ from .blog import FetchedArticle
 from .dates import db_to_local
 from .llm import BlogDraft
 from .store import (
-    ConversationSummary,
+    ConversationInfo,
     MessageHit,
     MessageNote,
     Page,
@@ -75,7 +75,7 @@ def render_search(page: Page[MessageHit], offset: int, max_chars: int, keywords:
     return "\n".join(lines)
 
 
-def render_conversation_list(page: Page[ConversationSummary], offset: int) -> str:
+def render_conversation_list(page: Page[ConversationInfo], offset: int) -> str:
     lines = [page_header(page.total, offset, len(page.items), "会話")]
     for c in page.items:
         lines.append(
@@ -99,7 +99,7 @@ class Scope:
     all_branches: bool
     leaf_count: int
 
-    def describe(self, info: ConversationSummary) -> str:
+    def describe(self, info: ConversationInfo) -> str:
         if self.all_branches:
             return f"すべての枝の {len(self.messages)} 件"
         text = f"この線は {len(self.messages)} 件（会話全体 {info.message_count} 件"
@@ -133,7 +133,7 @@ def branch_note(pm: PositionedMessage, scope: Scope) -> str:
     return ""
 
 
-def render_messages(info: ConversationSummary, scope: Scope, start: int, count: int, max_chars: int | None) -> str:
+def render_messages(info: ConversationInfo, scope: Scope, start: int, count: int, max_chars: int | None) -> str:
     candidates = [pm for pm in scope.messages if pm.position >= start]
     shown, rest = candidates[:count], candidates[count:]
     lines = [f"「{conversation_title(info.name, info.first_human_text)}」 conversation={info.uuid}"]
@@ -157,7 +157,7 @@ def render_messages(info: ConversationSummary, scope: Scope, start: int, count: 
     return "\n".join(lines)
 
 
-def render_markdown(info: ConversationSummary, scope: Scope, include_details: bool) -> str:
+def render_markdown(info: ConversationInfo, scope: Scope, include_details: bool) -> str:
     """ファイルに書き出す用。本文は省略しない。"""
     lines = [
         f"# {conversation_title(info.name, info.first_human_text)}",
@@ -184,7 +184,7 @@ def render_markdown(info: ConversationSummary, scope: Scope, include_details: bo
     return "\n".join(lines) + "\n"
 
 
-def render_transcript(info: ConversationSummary, messages: Sequence[PositionedMessage]) -> str:
+def render_transcript(info: ConversationInfo, messages: Sequence[PositionedMessage]) -> str:
     """LLM に渡す会話ログ。本文だけで、見出しに index を付ける。"""
     lines = [f"# {conversation_title(info.name, info.first_human_text)}"]
     for pm in messages:
@@ -209,7 +209,7 @@ def format_cost(cost_usd: float | None, cached: bool) -> str:
 
 
 def render_summary_header(
-    info: ConversationSummary,
+    info: ConversationInfo,
     messages: Sequence[PositionedMessage],
     summary: Summary,
     unit: str,
@@ -236,7 +236,7 @@ def render_summary_header(
 
 
 def render_summary(
-    info: ConversationSummary,
+    info: ConversationInfo,
     messages: Sequence[PositionedMessage],
     summary: Summary,
     cached: bool,
@@ -331,7 +331,7 @@ def material_warning(material_chars: int, threshold: int) -> str | None:
 
 
 def render_blog_draft(
-    info: ConversationSummary,
+    info: ConversationInfo,
     messages: Sequence[PositionedMessage],
     summary: Summary,
     draft: BlogDraft,
