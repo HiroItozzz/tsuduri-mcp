@@ -271,3 +271,44 @@ def test_line_with_two_roots_takes_the_newest_root(tmp_path):
 
     assert uuids(s.get_line("c")) == ["b0", "b1"]
     conn.close()
+
+
+# --- search_messages の on_main_line / main_line_only ---
+
+
+def test_search_marks_messages_off_the_main_line(branchy):
+    # 「テストの続き」は古い枝の m2 と、本線の m2b（言い直したテストの続き）の両方に当たる
+    page = branchy.search_messages(["テストの続き"])
+
+    assert [(h.position, h.on_main_line) for h in page.items] == [(4, True), (2, False)]
+
+
+def test_search_main_line_only_drops_other_branches(branchy):
+    page = branchy.search_messages(["テストの続き"], main_line_only=True)
+
+    assert found(page) == [("c", 4)]
+    assert page.total == 1
+
+
+def test_reimporting_extended_old_branch_swaps_main_line(branchy, tmp_path):
+    # 古い枝（m3 の続き）に m5 を足した新しいエクスポートを取り込む。m5 がいちばん新しくなるので本線が入れ替わる
+    msgs = [
+        raw_message("m0", text="テストの質問", created_at=at(1, 0)),
+        raw_message("m1", sender="assistant", text="テストの答え", parent="m0", created_at=at(1, 1)),
+        raw_message("m2", text="テストの続き", parent="m1", created_at=at(1, 2)),
+        raw_message("m3", sender="assistant", text="古い枝の答え", parent="m2", created_at=at(1, 3)),
+        raw_message("m2b", text="言い直したテストの続き", parent="m1", created_at=at(1, 4)),
+        raw_message("m3b", sender="assistant", text="新しい枝の答え", parent="m2b", created_at=at(1, 5)),
+        raw_message("m4b", text="新しい枝のさらに続き", parent="m3b", created_at=at(1, 6)),
+        raw_message("m5", text="古い枝への追加発言", parent="m3", created_at=at(1, 7)),
+    ]
+    path = tmp_path / "conversations.json"
+    path.write_text(
+        json.dumps([raw_conversation("c", msgs, updated_at=at(1, 7))], ensure_ascii=False), encoding="utf-8"
+    )
+
+    branchy.import_conversations(ClaudeExportSource(path).load())
+
+    assert uuids(branchy.get_line("c")) == ["m0", "m1", "m2", "m3", "m5"]
+    page = branchy.search_messages(["テストの続き"])
+    assert [(h.position, h.on_main_line) for h in page.items] == [(4, False), (2, True)]  # 印が入れ替わっている

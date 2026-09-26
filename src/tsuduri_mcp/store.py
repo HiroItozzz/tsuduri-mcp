@@ -71,6 +71,11 @@ CREATE TABLE IF NOT EXISTS message_notes (
     noticed_at   TEXT NOT NULL,  -- 最初に気づいた日時（UTC、DB と同じ形）
     PRIMARY KEY (message_uuid, kind)
 );
+
+-- 会話ごとの本線（through_index なしの get_line）に乗っているメッセージ。取り込みのたびに作り直す
+CREATE TABLE IF NOT EXISTS main_line_messages (
+    message_uuid TEXT PRIMARY KEY REFERENCES messages(uuid)
+);
 """
 
 FTS_MIN_CHARS = 3
@@ -106,6 +111,7 @@ class MessageHit:
     sender: str
     created_at: str
     text: str
+    on_main_line: bool
 
 
 @dataclass
@@ -164,6 +170,59 @@ class Line:
 
 
 @dataclass
+class _Node:
+    """線を選ぶのに必要な列だけを持つ、軽いメッセージの表現。"""
+
+    uuid: str
+    parent_uuid: str | None
+    created_at: str
+    position: int
+
+
+def _select_line(nodes: Sequence[_Node], through_index: int | None = None) -> list[str]:
+    """through_index のメッセージを通る線を選び、position 順（古い→新しい）の uuid を返す。
+
+    そのメッセージより前は親をたどり、後はいちばん新しい続きをたどる。
+    through_index を省くと、会話でいちばん新しいメッセージを通る線（本線）になる。
+    nodes が空なら空のリストを返す。
+    """
+    if not nodes:
+        return []
+    by_uuid = {n.uuid: n for n in nodes}
+    children: dict[str, list[_Node]] = {}
+    for n in nodes:
+        if n.parent_uuid in by_uuid:
+            children.setdefault(n.parent_uuid, []).append(n)
+
+    def newest(ns: Iterable[_Node]) -> _Node:
+        return max(ns, key=lambda n: (n.created_at, n.position))
+
+    if through_index is None:
+        through = newest(nodes)
+    else:
+        found = [n for n in nodes if n.position == through_index]
+        if not found:
+            raise ValueError(f"index={through_index} のメッセージはありません（0〜{len(nodes) - 1}）")
+        through = found[0]
+
+    # 後ろ: through の子孫のうち、いちばん新しいものを終点にする
+    descendants, stack = [through], [through]
+    while stack:
+        kids = children.get(stack.pop().uuid, [])
+        descendants += kids
+        stack += kids
+    leaf: _Node | None = newest(descendants)
+
+    # 前: 終点から親をたどる
+    line = []
+    while leaf is not None:
+        line.append(leaf)
+        parent = leaf.parent_uuid
+        leaf = by_uuid.get(parent) if parent is not None else None
+    return [n.uuid for n in line[::-1]]
+
+
+@dataclass
 class Page[T]:
     total: int
     items: list[T]
@@ -206,6 +265,12 @@ def _direction(order: Literal["newest", "oldest"]) -> str:
     return "DESC" if order == "newest" else "ASC"
 
 
+def _hit_from_row(row: sqlite3.Row) -> MessageHit:
+    data = dict(row)
+    data["on_main_line"] = bool(data["on_main_line"])
+    return MessageHit(**data)
+
+
 class ConversationStore:
     def __init__(self, conn: sqlite3.Connection):
         self.conn = conn
@@ -230,6 +295,7 @@ class ConversationStore:
                 result.messages_added += self._insert_messages(conv)
                 # 印の更新も、会話の追加・更新の有無にかかわらず、エクスポートに入っていた会話は必ず調べる
                 result.notes_added += self._update_notes(conv)
+            self._recompute_main_line()
         return result
 
     def _upsert_conversation(self, conv: Conversation) -> None:
@@ -299,6 +365,25 @@ class ConversationStore:
     def _remove_note(self, message_uuid: str, kind: str) -> None:
         self.conn.execute("DELETE FROM message_notes WHERE message_uuid = ? AND kind = ?", (message_uuid, kind))
 
+    def _recompute_main_line(self) -> None:
+        """全会話の本線（through_index なしの get_line）を計算し直し、main_line_messages を入れ替える。
+
+        本文や raw_content は読まず、線を選ぶのに必要な列だけを1回のクエリで読む。
+        """
+        rows = self.conn.execute(
+            "SELECT conversation_uuid, uuid, parent_uuid, created_at, position FROM messages ORDER BY position"
+        ).fetchall()
+        by_conversation: dict[str, list[_Node]] = {}
+        for row in rows:
+            by_conversation.setdefault(row["conversation_uuid"], []).append(
+                _Node(row["uuid"], row["parent_uuid"], row["created_at"], row["position"])
+            )
+        main_line_uuids = [uuid for nodes in by_conversation.values() for uuid in _select_line(nodes)]
+        self.conn.execute("DELETE FROM main_line_messages")
+        self.conn.executemany(
+            "INSERT INTO main_line_messages (message_uuid) VALUES (?)", [(uuid,) for uuid in main_line_uuids]
+        )
+
     # --- 読み出し ---
 
     def search_messages(
@@ -311,6 +396,7 @@ class ConversationStore:
         since: str | None = None,
         until: str | None = None,
         conversation_uuid: str | None = None,
+        main_line_only: bool = False,
         order: Literal["newest", "oldest"] = "newest",
         limit: int = 20,
         offset: int = 0,
@@ -329,17 +415,24 @@ class ConversationStore:
         where.add_if_given("m.created_at >= ?", since)
         where.add_if_given("m.created_at < ?", until)
         where.add_if_given("m.conversation_uuid = ?", conversation_uuid)
+        if main_line_only:
+            # IN (SELECT …) だと本線の全件を先に走査する計画になり遅い（実データで約 2.5 秒）。
+            # EXISTS なら、ほかの条件で絞った行だけを確かめる（約 0.002 秒）
+            where.add("EXISTS (SELECT 1 FROM main_line_messages ml WHERE ml.message_uuid = m.uuid)")
 
         total = self.conn.execute(f"SELECT count(*) FROM messages m WHERE {where.sql}", where.params).fetchone()[0]
         rows = self.conn.execute(
-            f"""SELECT m.conversation_uuid, c.name AS conversation_name, m.position, m.sender, m.created_at, m.text
-                FROM messages m JOIN conversations c ON c.uuid = m.conversation_uuid
+            f"""SELECT m.conversation_uuid, c.name AS conversation_name, m.position, m.sender, m.created_at, m.text,
+                       ml.message_uuid IS NOT NULL AS on_main_line
+                FROM messages m
+                JOIN conversations c ON c.uuid = m.conversation_uuid
+                LEFT JOIN main_line_messages ml ON ml.message_uuid = m.uuid
                 WHERE {where.sql}
                 ORDER BY m.created_at {_direction(order)}, m.position {_direction(order)}
                 LIMIT ? OFFSET ?""",
             [*where.params, limit, offset],
         ).fetchall()
-        return Page(total, [MessageHit(**row) for row in rows])
+        return Page(total, [_hit_from_row(row) for row in rows])
 
     def list_conversations(
         self,
@@ -442,39 +535,12 @@ class ConversationStore:
         messages = self.get_messages(conversation_uuid)
         if not messages:
             return Line([], 0)
+        nodes = [_Node(pm.message.uuid, pm.message.parent_uuid, pm.message.created_at, pm.position) for pm in messages]
+        line_uuids = _select_line(nodes, through_index)
         by_uuid = {pm.message.uuid: pm for pm in messages}
-        children: dict[str, list[PositionedMessage]] = {}
-        for pm in messages:
-            if pm.message.parent_uuid in by_uuid:
-                children.setdefault(pm.message.parent_uuid, []).append(pm)
-
-        def newest(pms: Iterable[PositionedMessage]) -> PositionedMessage:
-            return max(pms, key=lambda pm: (pm.message.created_at, pm.position))
-
-        if through_index is None:
-            through = newest(messages)
-        else:
-            found = [pm for pm in messages if pm.position == through_index]
-            if not found:
-                raise ValueError(f"index={through_index} のメッセージはありません（0〜{len(messages) - 1}）")
-            through = found[0]
-
-        # 後ろ: through の子孫のうち、いちばん新しいものを終点にする
-        descendants, stack = [through], [through]
-        while stack:
-            kids = children.get(stack.pop().message.uuid, [])
-            descendants += kids
-            stack += kids
-        leaf: PositionedMessage | None = newest(descendants)
-
-        # 前: 終点から親をたどる
-        line = []
-        while leaf is not None:
-            line.append(leaf)
-            parent = leaf.message.parent_uuid
-            leaf = by_uuid.get(parent) if parent is not None else None
-        leaf_count = sum(1 for pm in messages if pm.message.uuid not in children)
-        return Line(line[::-1], leaf_count)
+        parents_with_children = {n.parent_uuid for n in nodes if n.parent_uuid in by_uuid}
+        leaf_count = sum(1 for n in nodes if n.uuid not in parents_with_children)
+        return Line([by_uuid[uuid] for uuid in line_uuids], leaf_count)
 
     # --- 要約 ---
 

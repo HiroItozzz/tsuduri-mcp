@@ -52,10 +52,13 @@ def conversation_title(name: str, first_human_text: str = "") -> str:
 def render_search(page: Page[MessageHit], offset: int, max_chars: int, keywords: Sequence[str]) -> str:
     lines = [page_header(page.total, offset, len(page.items), "メッセージ")]
     for hit in page.items:
-        lines.append(
+        heading = (
             f"\n--- conversation={hit.conversation_uuid} index={hit.position} {hit.sender} "
             f"{db_to_local(hit.created_at)} 「{conversation_title(hit.conversation_name)}」"
         )
+        if not hit.on_main_line:
+            heading += f" ［本線外。through_index={hit.position} でこの枝を読める］"
+        lines.append(heading)
         lines.append(excerpt(hit.text, max_chars, keywords) or "（本文なし）")
     return "\n".join(lines)
 

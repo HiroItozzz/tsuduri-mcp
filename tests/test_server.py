@@ -45,6 +45,14 @@ def test_search_returns_conversation_and_index_with_excerpt():
     assert len(result) < 500
 
 
+def test_search_marks_hits_off_the_main_line():
+    # m1 は m0 の子だが、m2（index=2）のほうが新しく本線に選ばれるので、m1 の当たりは本線外になる
+    result = server.search_messages(["つづりちゃん"], max_chars=100)
+
+    assert "本線外" in result
+    assert "through_index=1" in result
+
+
 def test_search_rejects_one_char_keyword():
     with pytest.raises(ValueError, match="2文字以上"):
         server.search_messages(["あ"])

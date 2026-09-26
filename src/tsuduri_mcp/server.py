@@ -85,6 +85,9 @@ def search_messages(
     since: Since = None,
     until: Until = None,
     conversation_uuid: Annotated[str | None, Field(description="この会話の中だけを探す")] = None,
+    main_line_only: Annotated[
+        bool, Field(description="true なら、枝分かれした会話の本線（いちばん新しい枝）のメッセージだけを探す")
+    ] = False,
     order: Literal["newest", "oldest"] = "newest",
     limit: Annotated[int, Field(ge=1, le=MAX_LIMIT)] = 20,
     offset: Annotated[int, Field(ge=0)] = 0,
@@ -109,6 +112,7 @@ def search_messages(
             since=since and since_to_db(since),
             until=until and until_to_db(until),
             conversation_uuid=conversation_uuid,
+            main_line_only=main_line_only,
             order=order,
             limit=limit,
             offset=offset,
