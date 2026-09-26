@@ -11,6 +11,11 @@ from authlib.integrations.httpx_client import OAuth1Auth
 
 JST = timezone(timedelta(hours=9))
 
+REQUEST_TIMEOUT_SECONDS = 30.0
+
+# 通信に失敗しても、はてな側に届いているかどうかはこちらからはわからない
+UNKNOWN_RESULT_HINT = "投稿されたかどうかわからないので、はてなの下書き一覧を確かめてから再実行してください"
+
 
 @dataclass
 class BlogArticle:
@@ -100,16 +105,26 @@ class HatenaPoster(BlogPoster):
             force_include_body=True,
         )
         headers = {"Content-Type": "application/xml; charset=utf-8"}
-        if self._client is not None:
-            response = await self._client.post(self.entry_url, auth=auth, content=xml_entry, headers=headers)
-        else:
-            async with httpx2.AsyncClient() as client:
-                response = await client.post(self.entry_url, auth=auth, content=xml_entry, headers=headers)
+        try:
+            if self._client is not None:
+                response = await self._client.post(self.entry_url, auth=auth, content=xml_entry, headers=headers)
+            else:
+                async with httpx2.AsyncClient(timeout=REQUEST_TIMEOUT_SECONDS) as client:
+                    response = await client.post(self.entry_url, auth=auth, content=xml_entry, headers=headers)
+        except httpx2.HTTPError as e:
+            raise RuntimeError(
+                f"はてなブログとの通信に失敗しました（{type(e).__name__}）。{UNKNOWN_RESULT_HINT}"
+            ) from e
         if response.status_code != 201:
             raise RuntimeError(
                 f"はてなブログへの投稿に失敗しました（status={response.status_code}）: {response.text[:200]}"
             )
-        return self._parse_response(response.text)
+        try:
+            return self._parse_response(response.text)
+        except ET.ParseError as e:
+            raise RuntimeError(
+                f"はてなブログの応答を解釈できませんでした（{type(e).__name__}）。{UNKNOWN_RESULT_HINT}"
+            ) from e
 
     def _build_entry(self, article: BlogArticle, *, draft: bool) -> str:
         """はてなブログ投稿リクエストの Atom XML を組み立てる。"""

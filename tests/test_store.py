@@ -201,3 +201,42 @@ def test_record_post_saves_service_url_title(store, tmp_path):
     assert (row["service"], row["url"], row["title"]) == ("hatena", "https://example.com/1", "タイトル")
     rows = store.conn.execute("SELECT message_uuid FROM post_messages WHERE post_id = ?", (post_id,))
     assert {r["message_uuid"] for r in rows} == {"m1", "m2"}
+
+
+def test_find_posted_overlap_is_empty_when_nothing_recorded(store, tmp_path):
+    import_raw(store, tmp_path, [two_turns()])
+
+    assert store.find_posted_overlap(["m1", "m2"]) == []
+
+
+def test_find_posted_overlap_reports_count_per_post(store, tmp_path):
+    import_raw(store, tmp_path, [two_turns()])
+    store.record_post("c1", "hatena", "https://example.com/1", "はてなの記事", ["m1", "m2"])
+
+    overlaps = store.find_posted_overlap(["m1", "m2"])
+
+    assert len(overlaps) == 1
+    assert (overlaps[0].service, overlaps[0].title, overlaps[0].count) == ("hatena", "はてなの記事", 2)
+
+
+# --- DB 接続 ---
+
+
+def test_connect_sets_wal_and_busy_timeout_for_file_db(tmp_path):
+    conn = connect(tmp_path / "tsuduri.db")
+    try:
+        journal_mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+        busy_timeout = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+        assert journal_mode == "wal"
+        assert busy_timeout == 30000
+    finally:
+        conn.close()
+
+
+def test_connect_does_not_set_wal_for_in_memory_db():
+    conn = connect(":memory:")
+    try:
+        journal_mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+        assert journal_mode != "wal"  # :memory: は WAL にならない
+    finally:
+        conn.close()

@@ -77,7 +77,7 @@ CREATE TABLE IF NOT EXISTS main_line_messages (
     message_uuid TEXT PRIMARY KEY REFERENCES messages(uuid)
 );
 
--- ブログ投稿の記録（record_blog_post）。投稿自体はこのサーバーからは行わない
+-- ブログ投稿の記録。post_blog_article が投稿してそのまま記録する。手で投稿したときは record_blog_post で記録する
 CREATE TABLE IF NOT EXISTS posts (
     id                INTEGER PRIMARY KEY,
     conversation_uuid TEXT NOT NULL REFERENCES conversations(uuid),
@@ -105,11 +105,16 @@ def default_db_path() -> Path:
 
 
 def connect(path: Path | str) -> sqlite3.Connection:
-    if str(path) != ":memory:":
+    is_file_db = str(path) != ":memory:"
+    if is_file_db:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row  # 列を名前で取り出す
     conn.execute("PRAGMA foreign_keys = ON")
+    if is_file_db:
+        # :memory: には効かない（WAL はファイルが前提）ので、ファイルの DB のときだけ設定する
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA busy_timeout = 30000")
     return conn
 
 
@@ -193,6 +198,15 @@ class PostRecord:
     min_position: int  # 投稿に使ったメッセージのうち、いちばん古いものの position
     max_position: int  # いちばん新しいものの position
     message_uuids: frozenset[str]
+
+
+@dataclass
+class PostOverlap:
+    """記録しようとしている範囲のうち、すでに投稿として記録されている分。"""
+
+    service: str
+    title: str
+    count: int  # 重なっているメッセージの数
 
 
 @dataclass
@@ -603,6 +617,25 @@ class ConversationStore:
             )
         assert post_id is not None
         return post_id
+
+    def find_posted_overlap(self, message_uuids: Sequence[str]) -> list[PostOverlap]:
+        """message_uuids のうち、すでに投稿として記録されている分を、投稿ごとにまとめて返す。
+
+        同じ範囲を別サービスに投稿することがあるので、二重記録そのものは止めず、知らせるためだけに使う。
+        """
+        if not message_uuids:
+            return []
+        placeholders = ",".join("?" * len(message_uuids))
+        rows = self.conn.execute(
+            f"""SELECT p.service, p.title, count(*) AS overlap_count
+                FROM post_messages pm
+                JOIN posts p ON p.id = pm.post_id
+                WHERE pm.message_uuid IN ({placeholders})
+                GROUP BY p.id
+                ORDER BY p.id""",
+            message_uuids,
+        ).fetchall()
+        return [PostOverlap(row["service"], row["title"], row["overlap_count"]) for row in rows]
 
     def list_posts(self, conversation_uuid: str) -> list[PostRecord]:
         """この会話に記録された投稿を、記録した順に返す。"""

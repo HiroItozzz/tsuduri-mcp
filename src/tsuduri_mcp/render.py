@@ -8,7 +8,16 @@ from dataclasses import dataclass
 
 from .dates import db_to_local
 from .llm import BlogDraft
-from .store import ConversationSummary, MessageHit, MessageNote, Page, PositionedMessage, PostRecord, Summary
+from .store import (
+    ConversationSummary,
+    MessageHit,
+    MessageNote,
+    Page,
+    PositionedMessage,
+    PostOverlap,
+    PostRecord,
+    Summary,
+)
 
 UNTITLED = "（タイトルなし）"
 
@@ -240,6 +249,18 @@ def render_posts_note(posts: Sequence[PostRecord], line_uuids: set[str]) -> str 
         branch = "この枝" if p.message_uuids <= line_uuids else "別の枝"
         lines.append(f"- 「{p.title}」 {p.service} index {p.min_position}〜{p.max_position}（{branch}） {p.url}")
     return "\n".join(lines)
+
+
+def render_duplicate_note(overlaps: Sequence[PostOverlap]) -> str | None:
+    """記録しようとしている範囲に、すでに投稿の記録があるメッセージが含まれていれば知らせる。
+
+    同じ範囲を別サービスに投稿することがあるので、止めずに知らせるだけにする。
+    """
+    if not overlaps:
+        return None
+    total = sum(o.count for o in overlaps)
+    detail = "、".join(f"「{o.title}」（{o.service}）" for o in overlaps)
+    return f"このうち {total} 件はすでに投稿の記録があります: {detail}"
 
 
 def render_branch_note(leaf_count: int, through_index: int | None) -> str | None:

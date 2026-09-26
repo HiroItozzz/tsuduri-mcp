@@ -164,6 +164,30 @@ def test_post_raises_runtime_error_when_not_201():
         asyncio.run(run())
 
 
+def test_post_wraps_transport_error_with_a_hint_to_check_hatena():
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        raise httpx2.ConnectError("接続に失敗しました")
+
+    async def run():
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
+            await make_poster(client=client).post(article(), draft=True)
+
+    with pytest.raises(RuntimeError, match="下書き一覧を確かめてから再実行"):
+        asyncio.run(run())
+
+
+def test_post_wraps_malformed_response_xml_with_a_hint_to_check_hatena():
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(201, text="これは XML ではありません")
+
+    async def run():
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
+            await make_poster(client=client).post(article(), draft=True)
+
+    with pytest.raises(RuntimeError, match="下書き一覧を確かめてから再実行"):
+        asyncio.run(run())
+
+
 # --- from_env ---
 
 

@@ -990,6 +990,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "authlib" },
+    { name = "httpx2" },
     { name = "mcp" },
     { name = "pydantic-ai-slim", extra = ["google"] },
 ]
@@ -1004,6 +1005,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "authlib", specifier = ">=1.8.0" },
+    { name = "httpx2", specifier = ">=2.13.1" },
     { name = "mcp", specifier = ">=2.2.0" },
     { name = "pydantic-ai-slim", extras = ["google"], specifier = ">=2.51.0" },
 ]

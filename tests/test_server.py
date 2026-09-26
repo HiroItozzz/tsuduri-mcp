@@ -228,6 +228,16 @@ def test_record_blog_post_fully_posted_without_start_is_error():
         server.record_blog_post("c1", "hatena", "https://example.com/2", "続き")
 
 
+def test_record_blog_post_notes_when_the_range_is_already_recorded():
+    server.record_blog_post("c1", "hatena", "https://example.com/1", "タイトル", end=0)
+
+    # 同じ範囲（index 0）を別サービスへの投稿として、あらためて記録する
+    result = server.record_blog_post("c1", "qiita", "https://qiita.com/example/1", "続き", start=0, end=0)
+
+    assert "すでに投稿の記録があります" in result
+    assert "「タイトル」（hatena）" in result
+
+
 def test_list_marks_conversation_without_text(tmp_path, monkeypatch):
     hollow = raw_conversation("c-hollow", [raw_message("h0", text="", content=[])], name="")
     src = tmp_path / "hollow.json"

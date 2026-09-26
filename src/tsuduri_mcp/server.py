@@ -449,7 +449,7 @@ def record_blog_post(
     start: RangeStart = None,
     end: RangeEnd = None,
 ) -> str:
-    """draft_blog_post で作った下書きを投稿したら、同じ範囲で呼んで記録する。投稿自体はしない。
+    """post_blog_article を使わずに投稿したときだけ呼ぶ。投稿自体はしない。
 
     記録した範囲は、次回の draft_blog_post の既定の start や、list_conversations・search_messages の
     「投稿済み」表示に使われる。
@@ -457,12 +457,14 @@ def record_blog_post(
     with open_store() as store:
         info = find_conversation(store, conversation_uuid)
         resolved = resolve_post_range(store, conversation_uuid, through_index, start, end)
+        duplicate_note = render.render_duplicate_note(store.find_posted_overlap(resolved.message_uuids))
         store.record_post(conversation_uuid, service, url, title, resolved.message_uuids)
-    return (
+    result = (
         f"「{render.conversation_title(info.name, info.first_human_text)}」 conversation={conversation_uuid} の "
         f"index {resolved.start}〜{resolved.end}（この枝の {len(resolved.message_uuids)} 件）を "
         f"{service} への投稿として記録しました: {url}"
     )
+    return f"{duplicate_note}\n\n{result}" if duplicate_note else result
 
 
 @mcp_tool
@@ -491,6 +493,7 @@ async def post_blog_article(
     """
     with open_store() as store:
         resolved = resolve_post_range(store, conversation_uuid, through_index, start, end)
+        duplicate_note = render.render_duplicate_note(store.find_posted_overlap(resolved.message_uuids))
         saved = None
         if title is None or content is None:
             saved = store.find_latest_draft(resolved.message_uuids[0], resolved.message_uuids[-1])
@@ -508,16 +511,27 @@ async def post_blog_article(
     poster = make_poster(service)
     article = blog.BlogArticle(title=title, content=content, categories=categories or [])
     result = await poster.post(article, draft=not publish)
-    with open_store() as store:
-        store.record_post(conversation_uuid, service, result.url, title, resolved.message_uuids)
+    try:
+        with open_store() as store:
+            store.record_post(conversation_uuid, service, result.url, title, resolved.message_uuids)
+    except Exception as e:  # 投稿は済んでいるので、どんな失敗でも URL を返す
+        through_arg = f", through_index={through_index}" if through_index is not None else ""
+        raise RuntimeError(
+            f"投稿は済んでいます: {result.url}（編集: {result.edit_url}）。"
+            f"index {resolved.start}〜{resolved.end} の記録に失敗しました（{e}）。"
+            f"record_blog_post(start={resolved.start}, end={resolved.end}{through_arg}, "
+            f'service="{service}", url="{result.url}", title={title!r}) で記録してください。'
+            "post_blog_article をやり直すと二重投稿になります"
+        ) from e
     if result.is_draft:
         head = f"下書きとして投稿しました: {result.url}（公開するまで外からは見えない。編集: {result.edit_url}）。"
     else:
         head = f"公開しました: {result.url}（編集: {result.edit_url}）。"
-    return (
+    body = (
         head + f"conversation={conversation_uuid} の index {resolved.start}〜{resolved.end}"
         f"（この枝の {len(resolved.message_uuids)} 件）を記録しました"
     )
+    return f"{duplicate_note}\n\n{body}" if duplicate_note else body
 
 
 # --- MCP クライアント（Claude など）が自分で読んで書くための prompt ---

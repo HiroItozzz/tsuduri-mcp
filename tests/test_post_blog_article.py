@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import sqlite3
 
 import pytest
 from mcp.server.mcpserver.exceptions import ToolError
@@ -126,6 +127,39 @@ def test_failed_post_is_not_recorded(fake_poster):
         post()
 
     assert list_posts() == []
+
+
+def test_failed_record_after_a_successful_post_tells_how_to_record_manually(fake_poster, monkeypatch):
+    """投稿はすでに済んでいるので、URL を含めて record_blog_post のやり方を案内する（二重投稿を避けるため）。"""
+
+    def raise_sqlite_error(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(ConversationStore, "record_post", raise_sqlite_error)
+
+    with pytest.raises(ToolError) as excinfo:
+        post()
+
+    assert len(fake_poster.calls) == 1  # 投稿は1回だけ行われている
+    message = str(excinfo.value)
+    assert "https://blog.example.com/entry/1" in message  # 投稿された URL
+    assert "record_blog_post" in message
+    assert "二重投稿" in message
+
+
+def test_duplicate_range_is_noted_but_still_posted(fake_poster):
+    # 先に hatena への投稿として index 0 だけを記録しておく（別サービスへの投稿を想定）
+    record_conn = connect(default_db_path())
+    try:
+        ConversationStore(record_conn).record_post("c1", "hatena", "https://example.com/0", "前の記事", ["m0"])
+    finally:
+        record_conn.close()
+
+    result = post(start=0, end=2)
+
+    assert len(fake_poster.calls) == 1  # 記録が重なっていても投稿は止めない
+    assert "すでに投稿の記録があります" in result
+    assert result.index("すでに投稿の記録があります") < result.index("下書きとして投稿しました")
 
 
 def test_unsupported_service_is_rejected():
