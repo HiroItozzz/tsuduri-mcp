@@ -159,6 +159,20 @@ MCP の prompt（クライアント自身に読ませて書かせるための指
 - テストでは `server.make_model` を pydantic-ai の `FunctionModel` に差し替え、通信しない
 - stdout を汚さないことを確認済み: pydantic-ai の初回バナー（stderr）は `BANNER_ENABLED = False` で止め、google-genai の AFC の警告は logging 経由で stderr に1回だけ出る
 
+## ログ
+
+- `logs/tsuduri.log` に RotatingFileHandler（1MB × 5 世代）で書く。環境変数 `TSUDURI_LOG` で変えられる。`logs/` は git 管理外
+- 設定するのは `server.main()` の中だけ。テストや `tsuduri-import` では import するだけなので、ファイルはできない
+- `tsuduri_mcp` ロガーだけを INFO にし、root には流さない（stdout を汚さないため）。セッションごとにプロセスが立つので、書式にプロセス番号を入れる
+- 記録するもの: ツールの呼び出し（名前・uuid や範囲などの一部の引数・かかった時間・成否。失敗はトレースバックごと）、Gemini の呼び出し（種類・モデル・範囲・トークン数・料金・保存済みを使ったか）、投稿（service・URL・編集 URL・下書きか・範囲。DB に記録する前に書く）
+- 記録しないもの: 会話や記事の本文、検索キーワード、環境変数。ただしエラーの文言はそのまま残すので、「キーワードは2文字以上に」のエラーでは、その1文字のキーワードが入る
+
+## 料金
+
+- pydantic-ai の `RunUsage.cost`（中で genai-prices を使う）で出す。thinking のトークンも込みで、知らないモデルなら例外ではなく None になる
+- Gemini を実際に呼んだときだけ、新しいテーブル `llm_calls(kind, conversation_uuid, model, input_tokens, output_tokens, cost_usd, created_at)` に1行記録する。`summaries` は作り直すと上書きされるので、累計には使わない
+- 要約・下書きの戻り値に「約 $0.0150」と出す。わからなければ「料金は不明」、保存済みを使ったときは今回の料金がかからないことを出す
+
 ## 開発ツール
 
 ruff（リント・整形）と ty（型チェック）。`uv run ruff check . && uv run ruff format . && uv run ty check && uv run pytest`
@@ -169,7 +183,8 @@ ruff（リント・整形）と ty（型チェック）。`uv run ruff check . &
 - 表の変更への備え: 既存の表に列を足す必要が出たら、`PRAGMA user_version` で DB の版を確かめる仕組みを入れる（いまは新しい表を足すだけなので不要）
 - 枝の一覧を出すツール（各枝の最後の発言の冒頭と日時）。使ってみて必要なら
 - P3 の残り: Qiita / Dev.to
-- DeepSeek / OpenAI（pydantic-ai ならモデル名を足すだけ）、料金の表示
+- DeepSeek / OpenAI（pydantic-ai ならモデル名を足すだけ）
+- 料金の累計を見るツール（`llm_calls` を集計する）。使ってみて必要なら
 - エクスポート JSON の読み込みを pydantic のモデルで検証する（形式が増えたときに、どの項目がおかしいかをわかるようにする）
 - projects テーブル
 - thinking やツールの入出力も検索対象にするか（`raw_content` に残っている）
