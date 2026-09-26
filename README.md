@@ -28,10 +28,11 @@ claude mcp add tsuduri -- uv run --directory /path/to/tsuduri-mcp tsuduri-mcp
 | `get_messages` | 会話の一部を読む |
 | `export_conversation` | 会話の全文を Markdown ファイルに書き出す |
 | `summarize_conversation` | Gemini で要約する（要約は保存して使い回す） |
+| `draft_blog_post` | Gemini でブログの下書きを作る（投稿はしない） |
 
 prompt として `summarize_with_claude` と `draft_blog_with_claude` もある（クライアント自身が要約・下書きをする）。
 
-要約には環境変数 `GEMINI_API_KEY` が必要。
+要約と下書きには環境変数 `GEMINI_API_KEY` が必要。
 
 ## 開発
 
