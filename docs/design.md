@@ -83,7 +83,8 @@ AI のコンテキストを節約することを優先している。
 | `export_conversation` | 全文を Markdown ファイルに書き出して、パスだけを返す |
 | `summarize_conversation` | Gemini で1本の枝を要約する。要約は保存して使い回す |
 | `draft_blog_post` | Gemini で1本の枝からブログの下書き（タイトル・本文・カテゴリー）を作る。投稿はしない |
-| `record_blog_post` | 投稿した範囲（1本の枝の index a〜b）と URL を記録する。投稿自体はしない |
+| `post_blog_article` | はてなブログへ投稿し（既定は下書き）、投稿した範囲を記録する |
+| `record_blog_post` | 投稿した範囲（1本の枝の index a〜b）と URL を記録する。`post_blog_article` を使わずに投稿したとき用 |
 
 MCP の prompt（クライアント自身に読ませて書かせるための指示書）も2つある。
 
@@ -129,6 +130,17 @@ MCP の prompt（クライアント自身に読ませて書かせるための指
 - 戻り値の最後に、同じ範囲で `record_blog_post` を呼ぶための具体的な引数を書く。件数は「この枝の N 件」と書く（index の範囲には別の枝の index も含まれるため）
 - 材料が薄いと、Gemini は会話のタイトルに引っぱられて材料にない一般論を書いた。`prompts/blog.md` に「材料にない話題や一般論を足さない」を足し、本文の合計が 1,000 文字未満なら戻り値で注意する
 
+## ブログへの投稿
+
+- `blog.py` に投稿先のインターフェース `BlogPoster`（`post(article, draft=…)`）を置き、サービスごとに実装する（`sources.py` と同じ考え方）。いまは `HatenaPoster` だけ。Qiita / Dev.to は実装クラスを足し、`server.default_poster` に1行足せば入る
+- `post_blog_article` は、タイトル・本文・カテゴリーを引数で受け取る。Gemini の下書き・Claude が書いた下書き・手で直した下書きのどれでも投稿できるようにするため（保存済みの下書きを読む形にすると、Gemini の下書きしか投稿できない）
+- 既定は下書き投稿（`publish=true` で公開）。はてなの下書きも記事として扱い、投稿した範囲は `posts` に記録する
+- 範囲（start・end）は `record_blog_post` と同じ規則で、**投稿する前に**検証する。投稿に失敗したら記録しない
+- HTTP は httpx2。Authlib は httpx2 があるとそちらを選ぶので、旧 httpx のクライアントと組み合わせると `Invalid "auth" argument` で壊れる（cha2hatena で起きた）
+- 認証情報は環境変数 `HATENA_ENTRY_URL`・`HATENA_CONSUMER_KEY`・`HATENA_CONSUMER_SECRET`・`HATENA_ACCESS_TOKEN`・`HATENA_ACCESS_TOKEN_SECRET`（cha2hatena と同じ名前）。値は `<>` つきのままで動くので加工しない。足りないときは変数名だけを出すエラーにする
+- cha2hatena の pydantic のスキーマ・固定カテゴリー・author・公開時刻の指定は持ち込んでいない。必要になったら足す
+- テストでは `server.make_poster` を偽のポスターに差し替え、`HatenaPoster` は `httpx2.MockTransport` で確かめる。本物のはてなへの投稿はまだ試していない
+
 ## 要約（LLM）
 
 - pydantic-ai を通して Gemini（`gemini-3-flash-preview`）を呼ぶ。LiteLLM は `openai<3`・httpx（旧）を要求し、mcp の httpx2 と食い違うので使わない
@@ -149,7 +161,7 @@ ruff（リント・整形）と ty（型チェック）。`uv run ruff check . &
 - 投稿の一覧を出すツールや、記録の取り消し。使ってみて必要なら
 - 表の変更への備え: 既存の表に列を足す必要が出たら、`PRAGMA user_version` で DB の版を確かめる仕組みを入れる（いまは新しい表を足すだけなので不要）
 - 枝の一覧を出すツール（各枝の最後の発言の冒頭と日時）。使ってみて必要なら
-- P3: はてなポスターを httpx2 で移植し、既定は下書き投稿。投稿を `posts` に記録する。そのあと Qiita / Dev.to
+- P3 の残り: 本物のはてなで下書き投稿を試す。そのあと Qiita / Dev.to
 - DeepSeek / OpenAI（pydantic-ai ならモデル名を足すだけ）、料金の表示
 - エクスポート JSON の読み込みを pydantic のモデルで検証する（形式が増えたときに、どの項目がおかしいかをわかるようにする）
 - projects テーブル
