@@ -1,6 +1,6 @@
 """ツールの引数（ローカル時刻）と DB の日時（UTC の ISO 文字列）の変換"""
 
-from datetime import date, datetime, timedelta, timezone, tzinfo
+from datetime import UTC, date, datetime, timedelta, tzinfo
 
 DB_FORMAT = "%Y-%m-%dT%H:%M:%S.%fZ"  # エクスポートの日時と同じ形。文字列のまま大小を比べられる
 
@@ -12,7 +12,7 @@ def local_tz() -> tzinfo:
 
 
 def _to_db(dt: datetime) -> str:
-    return dt.astimezone(timezone.utc).strftime(DB_FORMAT)
+    return dt.astimezone(UTC).strftime(DB_FORMAT)
 
 
 def since_to_db(value: str, tz: tzinfo | None = None) -> str:
@@ -31,7 +31,7 @@ def until_to_db(value: str, tz: tzinfo | None = None) -> str:
 
 def db_to_local(value: str, tz: tzinfo | None = None) -> str:
     """表示用。`2026-09-20 21:03` の形にする。"""
-    dt = datetime.strptime(value, DB_FORMAT).replace(tzinfo=timezone.utc)
+    dt = datetime.strptime(value, DB_FORMAT).replace(tzinfo=UTC)
     return dt.astimezone(tz or local_tz()).strftime("%Y-%m-%d %H:%M")
 
 

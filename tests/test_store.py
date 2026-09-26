@@ -2,9 +2,10 @@ import json
 
 import pytest
 
-from claude_export import raw_conversation, raw_message
 from tsuduri_mcp.sources import ClaudeExportSource
 from tsuduri_mcp.store import ConversationStore, connect
+
+from claude_export import raw_conversation, raw_message
 
 OLD = "2026-01-01T00:00:00.000000Z"
 NEW = "2026-02-01T00:00:00.000000Z"
@@ -26,7 +27,10 @@ def import_raw(store, tmp_path, conversations):
 def two_turns():
     return raw_conversation(
         "c1",
-        [raw_message("m1", text="テストの質問"), raw_message("m2", sender="assistant", text="テストの答え", parent="m1")],
+        [
+            raw_message("m1", text="テストの質問"),
+            raw_message("m2", sender="assistant", text="テストの答え", parent="m1"),
+        ],
         updated_at=OLD,
     )
 

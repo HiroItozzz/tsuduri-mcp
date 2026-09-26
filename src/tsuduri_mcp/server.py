@@ -35,7 +35,9 @@ Until = Annotated[str | None, Field(description="この日時まで（YYYY-MM-DD
 def open_store() -> Iterator[ConversationStore]:
     path = default_db_path()
     if not path.exists():
-        raise FileNotFoundError(f"DB がありません: {path}。先に `uv run tsuduri-import <エクスポートの zip>` で取り込んでください")
+        raise FileNotFoundError(
+            f"DB がありません: {path}。先に `uv run tsuduri-import <エクスポートの zip>` で取り込んでください"
+        )
     with closing(connect(path)) as conn:
         yield ConversationStore(conn)
 
@@ -59,7 +61,9 @@ def search_messages(
     order: Literal["newest", "oldest"] = "newest",
     limit: Annotated[int, Field(ge=1, le=MAX_LIMIT)] = 20,
     offset: Annotated[int, Field(ge=0)] = 0,
-    max_chars: Annotated[int, Field(ge=50, description="1件あたりの最大文字数。長い本文はキーワードのまわりを切り出す")] = 800,
+    max_chars: Annotated[
+        int, Field(ge=50, description="1件あたりの最大文字数。長い本文はキーワードのまわりを切り出す")
+    ] = 800,
 ) -> str:
     """過去の会話のメッセージを、本文のキーワードで検索する。
 
@@ -148,4 +152,3 @@ def export_conversation(
 
 def main() -> None:
     mcp.run()  # 既定は stdio。stdout は通信に使われるので print してはいけない
-

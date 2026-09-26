@@ -3,7 +3,9 @@
 ROOT = "00000000-0000-4000-8000-000000000000"
 
 
-def raw_message(uuid, sender="human", text="テストの発言", parent=ROOT, created_at="2026-01-01T00:00:00.000000Z", content=None):
+def raw_message(
+    uuid, sender="human", text="テストの発言", parent=ROOT, created_at="2026-01-01T00:00:00.000000Z", content=None
+):
     return {
         "uuid": uuid,
         "text": text,

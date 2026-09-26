@@ -5,10 +5,11 @@ from pathlib import Path
 
 import pytest
 
-from claude_export import raw_conversation, raw_message
 from tsuduri_mcp import server
 from tsuduri_mcp.sources import ClaudeExportSource
 from tsuduri_mcp.store import ConversationStore, connect
+
+from claude_export import raw_conversation, raw_message
 
 LONG = "前置き" * 500 + "つづりちゃん" + "後書き" * 500
 

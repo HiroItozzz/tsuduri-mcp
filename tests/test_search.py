@@ -2,9 +2,10 @@ import json
 
 import pytest
 
-from claude_export import raw_conversation, raw_message
 from tsuduri_mcp.sources import ClaudeExportSource
 from tsuduri_mcp.store import ConversationStore, connect
+
+from claude_export import raw_conversation, raw_message
 
 
 def at(day: int, hour: int = 0) -> str:
@@ -18,7 +19,9 @@ def store(tmp_path):
             "c-python",
             [
                 raw_message("p0", text="Python の参照について教えて", created_at=at(1)),
-                raw_message("p1", sender="assistant", text="リストは参照が共有されます", parent="p0", created_at=at(1, 1)),
+                raw_message(
+                    "p1", sender="assistant", text="リストは参照が共有されます", parent="p0", created_at=at(1, 1)
+                ),
                 raw_message("p2", text="SQLite の全文検索も知りたい", parent="p1", created_at=at(2)),
             ],
             name="テストの Python の会話",
@@ -28,7 +31,13 @@ def store(tmp_path):
             "c-blog",
             [
                 raw_message("b0", text="はてなブログに投稿したい", created_at=at(10)),
-                raw_message("b1", sender="assistant", text="全文検索の結果をブログにしましょう", parent="b0", created_at=at(10, 1)),
+                raw_message(
+                    "b1",
+                    sender="assistant",
+                    text="全文検索の結果をブログにしましょう",
+                    parent="b0",
+                    created_at=at(10, 1),
+                ),
             ],
             name="",
             updated_at=at(20),

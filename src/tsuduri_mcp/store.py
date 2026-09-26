@@ -143,7 +143,14 @@ class ConversationStore:
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             [
                 (
-                    m.uuid, conv.uuid, i, m.parent_uuid, m.sender, m.text, m.created_at, m.updated_at,
+                    m.uuid,
+                    conv.uuid,
+                    i,
+                    m.parent_uuid,
+                    m.sender,
+                    m.text,
+                    m.created_at,
+                    m.updated_at,
                     json.dumps(m.raw_content, ensure_ascii=False),
                     json.dumps(m.attachments, ensure_ascii=False),
                     json.dumps(m.files, ensure_ascii=False),
