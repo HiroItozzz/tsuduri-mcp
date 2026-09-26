@@ -139,7 +139,8 @@ MCP の prompt（クライアント自身に読ませて書かせるための指
 - HTTP は httpx2。Authlib は httpx2 があるとそちらを選ぶので、旧 httpx のクライアントと組み合わせると `Invalid "auth" argument` で壊れる（cha2hatena で起きた）
 - 認証情報は環境変数 `HATENA_ENTRY_URL`・`HATENA_CONSUMER_KEY`・`HATENA_CONSUMER_SECRET`・`HATENA_ACCESS_TOKEN`・`HATENA_ACCESS_TOKEN_SECRET`（cha2hatena と同じ名前）。値は `<>` つきのままで動くので加工しない。足りないときは変数名だけを出すエラーにする
 - cha2hatena の pydantic のスキーマ・固定カテゴリー・author・公開時刻の指定は持ち込んでいない。必要になったら足す
-- テストでは `server.make_poster` を偽のポスターに差し替え、`HatenaPoster` は `httpx2.MockTransport` で確かめる。本物のはてなへの投稿はまだ試していない
+- はてなの応答には URL が2つある。`alternate`（記事の URL。下書きのあいだは外から見えない）と `edit`（管理画面の編集 URL）。下書きのときは、記事の URL がまだ見えないことを戻り値に書く
+- テストでは `server.make_poster` を偽のポスターに差し替え、`HatenaPoster` は `httpx2.MockTransport` で確かめる。2026-09-27 に本物のはてなで下書き投稿を確認した（下書き一覧に入る・Markdown が崩れない・投稿者の表示も問題なし。`<author>` を送らなくてよい）
 
 ## 要約（LLM）
 
@@ -161,7 +162,7 @@ ruff（リント・整形）と ty（型チェック）。`uv run ruff check . &
 - 投稿の一覧を出すツールや、記録の取り消し。使ってみて必要なら
 - 表の変更への備え: 既存の表に列を足す必要が出たら、`PRAGMA user_version` で DB の版を確かめる仕組みを入れる（いまは新しい表を足すだけなので不要）
 - 枝の一覧を出すツール（各枝の最後の発言の冒頭と日時）。使ってみて必要なら
-- P3 の残り: 本物のはてなで下書き投稿を試す。そのあと Qiita / Dev.to
+- P3 の残り: Qiita / Dev.to
 - DeepSeek / OpenAI（pydantic-ai ならモデル名を足すだけ）、料金の表示
 - エクスポート JSON の読み込みを pydantic のモデルで検証する（形式が増えたときに、どの項目がおかしいかをわかるようにする）
 - projects テーブル

@@ -94,17 +94,20 @@ def test_posts_and_records_the_range(fake_poster):
     assert posts[0].min_position == 0
     assert posts[0].max_position == 2
 
-    assert "下書き" in result
+    assert "下書きとして投稿しました" in result
+    assert "公開するまで外からは見えない" in result
     assert "https://blog.example.com/entry/1" in result
     assert "https://blog.hatena.ne.jp/user/blog.example.com/edit?entry=1" in result
     assert "index 0〜2（この枝の 2 件）" in result
 
 
 def test_publish_true_posts_without_draft(fake_poster):
-    post(publish=True)
+    result = post(publish=True)
 
     _, draft = fake_poster.calls[0]
     assert draft is False
+    assert "公開しました" in result
+    assert "外からは見えない" not in result
 
 
 def test_range_error_prevents_posting(fake_poster):

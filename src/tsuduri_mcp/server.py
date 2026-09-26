@@ -359,7 +359,7 @@ async def draft_blog_post(
     """Gemini でブログの下書き（タイトル・本文・カテゴリー）を作る。投稿はしない。
 
     下書きは保存され、2回目からは Gemini を呼ばない。
-    投稿したら、下書きに使った範囲（戻り値の index a〜b）で record_blog_post を呼んで記録する。
+    投稿は post_blog_article に、戻り値の index a〜b をそのまま渡す（投稿した範囲も記録される）。
     """
     with open_store() as store:
         line = store.get_line(conversation_uuid, through_index)
@@ -491,10 +491,12 @@ async def post_blog_article(
     result = await poster.post(article, draft=not publish)
     with open_store() as store:
         store.record_post(conversation_uuid, service, result.url, title, resolved.message_uuids)
-    status = "下書き" if result.is_draft else "公開"
+    if result.is_draft:
+        head = f"下書きとして投稿しました: {result.url}（公開するまで外からは見えない。編集: {result.edit_url}）。"
+    else:
+        head = f"公開しました: {result.url}（編集: {result.edit_url}）。"
     return (
-        f"{status}として投稿しました: {result.url}（編集: {result.edit_url}）。"
-        f"conversation={conversation_uuid} の index {resolved.start}〜{resolved.end}"
+        head + f"conversation={conversation_uuid} の index {resolved.start}〜{resolved.end}"
         f"（この枝の {len(resolved.message_uuids)} 件）を記録しました"
     )
 
