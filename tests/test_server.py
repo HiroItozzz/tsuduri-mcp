@@ -167,6 +167,62 @@ def test_get_messages_shows_note_when_content_is_missing(tmp_path):
     assert "最新のエクスポートでは本文が消えている" in result
 
 
+def test_record_blog_post_records_default_range():
+    result = server.record_blog_post("c1", "hatena", "https://example.com/1", "タイトル")
+
+    assert "index 0〜2" in result  # 既定は本線の全部（未投稿の始まり〜本線の最後）
+    assert "hatena" in result
+    assert "https://example.com/1" in result
+
+
+def test_record_blog_post_marks_messages_as_posted_in_search():
+    server.record_blog_post("c1", "hatena", "https://example.com/1", "タイトル")
+
+    result = server.search_messages(["テストの質問です"])
+
+    assert "投稿済み" in result
+
+
+def test_record_blog_post_shows_post_and_unposted_counts_in_list():
+    server.record_blog_post("c1", "hatena", "https://example.com/1", "タイトル", end=0)
+
+    result = server.list_conversations()
+
+    assert "投稿 1 件・本線の未投稿 1 件" in result  # 本線は m0, m2 の2件。投稿済みは m0 だけ
+
+
+def test_record_blog_post_default_start_is_the_unposted_start():
+    server.record_blog_post("c1", "hatena", "https://example.com/1", "タイトル", end=0)
+
+    result = server.record_blog_post("c1", "hatena", "https://example.com/2", "続き")
+
+    assert "index 2〜2" in result
+
+
+def test_record_blog_post_through_index_uses_that_branch():
+    result = server.record_blog_post("c1", "hatena", "https://example.com/1", "タイトル", through_index=1)
+
+    assert "index 0〜1" in result
+
+
+def test_record_blog_post_start_after_end_is_error():
+    with pytest.raises(ValueError):
+        server.record_blog_post("c1", "hatena", "https://example.com/1", "タイトル", start=2, end=0)
+
+
+def test_record_blog_post_index_not_on_the_line_is_error():
+    # index=1 は本線にない（本線は m0, m2。m1 は古い枝）
+    with pytest.raises(ValueError):
+        server.record_blog_post("c1", "hatena", "https://example.com/1", "タイトル", start=1)
+
+
+def test_record_blog_post_fully_posted_without_start_is_error():
+    server.record_blog_post("c1", "hatena", "https://example.com/1", "タイトル")
+
+    with pytest.raises(ValueError, match="投稿済み"):
+        server.record_blog_post("c1", "hatena", "https://example.com/2", "続き")
+
+
 def test_list_marks_conversation_without_text(tmp_path, monkeypatch):
     hollow = raw_conversation("c-hollow", [raw_message("h0", text="", content=[])], name="")
     src = tmp_path / "hollow.json"

@@ -60,6 +60,12 @@ def draft(**kwargs):
     return asyncio.run(server.draft_blog_post("c1", **kwargs))
 
 
+def record_post(message_uuids, service="hatena", url="https://example.com/1", title="旧タイトル"):
+    conn = connect(server.default_db_path())
+    ConversationStore(conn).record_post("c1", service, url, title, message_uuids)
+    conn.close()
+
+
 def test_draft_is_made_from_the_line(gemini):
     result = draft()
 
@@ -102,3 +108,45 @@ def test_summary_and_draft_are_saved_separately(gemini):
     assert "保存済み" in draft_result_2
     assert "まだ投稿していません" not in summary_result
     assert "まだ投稿していません" in draft_result
+
+
+# --- start の既定値（未投稿の始まり） ---
+
+
+def test_draft_without_posts_starts_from_the_beginning(gemini):
+    result = draft()
+
+    assert "index 0〜2" in result
+    assert "投稿済みなので" not in result
+
+
+def test_draft_default_start_skips_posted_messages(gemini):
+    record_post(["m0"])
+
+    result = draft()
+
+    assert "index 1〜2" in result
+
+
+def test_draft_default_start_adds_a_note_about_the_skip(gemini):
+    record_post(["m0"])
+
+    result = draft()
+
+    assert result.startswith("index 0〜0 は投稿済みなので index 1 から下書きにした（全部使うなら start=0）")
+
+
+def test_draft_explicit_start_overrides_the_default(gemini):
+    record_post(["m0", "m1", "m2"])  # 全部投稿済みでも、start を指定すれば作れる
+
+    result = draft(start=0)
+
+    assert "index 0〜2" in result
+    assert "投稿済みなので" not in result
+
+
+def test_draft_fully_posted_without_start_is_error(gemini):
+    record_post(["m0", "m1", "m2"])
+
+    with pytest.raises(ValueError, match="投稿済み"):
+        draft()

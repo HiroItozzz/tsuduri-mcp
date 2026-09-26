@@ -1,7 +1,7 @@
 """render.py の純粋な関数のテスト（DB やファイルは使わない）"""
 
 from tsuduri_mcp.models import Message
-from tsuduri_mcp.render import Scope, branch_note, excerpt, note_lines
+from tsuduri_mcp.render import Scope, branch_note, excerpt, note_lines, skip_note
 from tsuduri_mcp.store import MessageNote, PositionedMessage
 
 # --- excerpt ---
@@ -83,3 +83,16 @@ def test_note_lines_is_empty_without_notes():
     pm = _pm(0, None)
 
     assert note_lines(pm) == []
+
+
+# --- skip_note ---
+
+
+def test_skip_note_is_none_when_nothing_was_skipped():
+    assert skip_note(first_position=0, start=0) is None
+
+
+def test_skip_note_describes_the_skipped_range():
+    result = skip_note(first_position=0, start=3)
+
+    assert result == "index 0〜2 は投稿済みなので index 3 から下書きにした（全部使うなら start=0）"

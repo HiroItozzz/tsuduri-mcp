@@ -76,6 +76,25 @@ CREATE TABLE IF NOT EXISTS message_notes (
 CREATE TABLE IF NOT EXISTS main_line_messages (
     message_uuid TEXT PRIMARY KEY REFERENCES messages(uuid)
 );
+
+-- ブログ投稿の記録（record_blog_post）。投稿自体はこのサーバーからは行わない
+CREATE TABLE IF NOT EXISTS posts (
+    id                INTEGER PRIMARY KEY,
+    conversation_uuid TEXT NOT NULL REFERENCES conversations(uuid),
+    service           TEXT NOT NULL,  -- 'hatena' / 'qiita' / 'devto' / 'other'
+    url               TEXT NOT NULL,
+    title             TEXT NOT NULL,
+    posted_at         TEXT NOT NULL   -- 記録した日時（投稿した日時ではない）
+);
+
+-- 投稿に使った範囲（1本の線の上の、start〜end の index のメッセージ全部）
+CREATE TABLE IF NOT EXISTS post_messages (
+    post_id      INTEGER NOT NULL REFERENCES posts(id),
+    message_uuid TEXT NOT NULL REFERENCES messages(uuid),
+    PRIMARY KEY (post_id, message_uuid)
+);
+
+CREATE INDEX IF NOT EXISTS idx_post_messages_message ON post_messages(message_uuid);
 """
 
 FTS_MIN_CHARS = 3
@@ -112,6 +131,7 @@ class MessageHit:
     created_at: str
     text: str
     on_main_line: bool
+    posted: bool
 
 
 @dataclass
@@ -124,6 +144,8 @@ class ConversationSummary:
     text_message_count: int  # 本文のあるメッセージの数。エクスポートに本文が含まれない会話がある
     first_human_text: str  # タイトルが空の会話を見分けるため
     last_message_at: str  # 最後のメッセージの created_at。メッセージが0件なら updated_at
+    post_count: int  # この会話に記録されたブログ投稿の数
+    main_line_unposted_count: int  # 本線のメッセージのうち、まだ投稿に含まれていない数
 
 
 @dataclass
@@ -268,6 +290,7 @@ def _direction(order: Literal["newest", "oldest"]) -> str:
 def _hit_from_row(row: sqlite3.Row) -> MessageHit:
     data = dict(row)
     data["on_main_line"] = bool(data["on_main_line"])
+    data["posted"] = bool(data["posted"])
     return MessageHit(**data)
 
 
@@ -423,7 +446,8 @@ class ConversationStore:
         total = self.conn.execute(f"SELECT count(*) FROM messages m WHERE {where.sql}", where.params).fetchone()[0]
         rows = self.conn.execute(
             f"""SELECT m.conversation_uuid, c.name AS conversation_name, m.position, m.sender, m.created_at, m.text,
-                       ml.message_uuid IS NOT NULL AS on_main_line
+                       ml.message_uuid IS NOT NULL AS on_main_line,
+                       EXISTS (SELECT 1 FROM post_messages pm WHERE pm.message_uuid = m.uuid) AS posted
                 FROM messages m
                 JOIN conversations c ON c.uuid = m.conversation_uuid
                 LEFT JOIN main_line_messages ml ON ml.message_uuid = m.uuid
@@ -472,7 +496,14 @@ class ConversationStore:
                                  ORDER BY m.position LIMIT 1), '') AS first_human_text,
                        coalesce((SELECT m.created_at FROM messages m
                                  WHERE m.conversation_uuid = c.uuid
-                                 ORDER BY m.position DESC LIMIT 1), c.updated_at) AS last_message_at
+                                 ORDER BY m.position DESC LIMIT 1), c.updated_at) AS last_message_at,
+                       (SELECT count(*) FROM posts p WHERE p.conversation_uuid = c.uuid) AS post_count,
+                       (SELECT count(*) FROM main_line_messages ml
+                                 JOIN messages m ON m.uuid = ml.message_uuid
+                                 WHERE m.conversation_uuid = c.uuid
+                                   AND NOT EXISTS
+                                       (SELECT 1 FROM post_messages pm WHERE pm.message_uuid = ml.message_uuid)
+                       ) AS main_line_unposted_count
                 FROM conversations c WHERE {where.sql}
                 ORDER BY last_message_at {_direction(order)}
                 LIMIT ? OFFSET ?""",
@@ -541,6 +572,52 @@ class ConversationStore:
         parents_with_children = {n.parent_uuid for n in nodes if n.parent_uuid in by_uuid}
         leaf_count = sum(1 for n in nodes if n.uuid not in parents_with_children)
         return Line([by_uuid[uuid] for uuid in line_uuids], leaf_count)
+
+    # --- ブログ投稿の記録 ---
+
+    def record_post(
+        self, conversation_uuid: str, service: str, url: str, title: str, message_uuids: Sequence[str]
+    ) -> int:
+        """投稿を記録する（posts と post_messages を1トランザクションで書く）。作った post の id を返す。"""
+        with self.conn:
+            cursor = self.conn.execute(
+                "INSERT INTO posts (conversation_uuid, service, url, title, posted_at) VALUES (?, ?, ?, ?, ?)",
+                (conversation_uuid, service, url, title, now_db()),
+            )
+            post_id = cursor.lastrowid
+            self.conn.executemany(
+                "INSERT INTO post_messages (post_id, message_uuid) VALUES (?, ?)",
+                [(post_id, uuid) for uuid in message_uuids],
+            )
+        assert post_id is not None
+        return post_id
+
+    def _posted_uuids(self, message_uuids: Sequence[str]) -> set[str]:
+        """このメッセージ uuid のうち、すでに投稿の記録があるものを返す。"""
+        if not message_uuids:
+            return set()
+        placeholders = ",".join("?" * len(message_uuids))
+        rows = self.conn.execute(
+            f"SELECT DISTINCT message_uuid FROM post_messages WHERE message_uuid IN ({placeholders})",
+            message_uuids,
+        ).fetchall()
+        return {row["message_uuid"] for row in rows}
+
+    def unposted_start(self, line_messages: Sequence[PositionedMessage]) -> int | None:
+        """1本の線の上で、まだ投稿していない部分の始まりの index。
+
+        投稿がなければ線の最初の index。全部投稿済みなら None（呼び出し側でエラーにする）。
+        「次の index」は線の並びの上でのすぐ次のメッセージ（枝分かれで index が飛んでいても、この線に実在する index）。
+        """
+        if not line_messages:
+            return 0
+        posted = self._posted_uuids([pm.message.uuid for pm in line_messages])
+        if not posted:
+            return line_messages[0].position
+        last_posted_i = max(i for i, pm in enumerate(line_messages) if pm.message.uuid in posted)
+        if last_posted_i == len(line_messages) - 1:
+            return None
+        return line_messages[last_posted_i + 1].position
 
     # --- 要約 ---
 

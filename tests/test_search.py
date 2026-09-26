@@ -270,6 +270,8 @@ def test_line_with_two_roots_takes_the_newest_root(tmp_path):
     s.import_conversations(ClaudeExportSource(path).load())
 
     assert uuids(s.get_line("c")) == ["b0", "b1"]
+    # 投稿がなければ、未投稿の始まりは 0 ではなく線の最初の index
+    assert s.unposted_start(s.get_line("c").messages) == 2
     conn.close()
 
 
@@ -312,3 +314,38 @@ def test_reimporting_extended_old_branch_swaps_main_line(branchy, tmp_path):
     assert uuids(branchy.get_line("c")) == ["m0", "m1", "m2", "m3", "m5"]
     page = branchy.search_messages(["テストの続き"])
     assert [(h.position, h.on_main_line) for h in page.items] == [(4, False), (2, True)]  # 印が入れ替わっている
+
+
+# --- ブログ投稿の記録（枝ごとに扱う） ---
+
+
+def test_unposted_start_is_scoped_to_the_line(branchy):
+    # 古い枝（m0, m1, m2, m3）を投稿済みにする
+    old_line = branchy.get_line("c", through_index=2)
+    branchy.record_post("c", "hatena", "https://example.com/1", "タイトル", uuids(old_line))
+
+    # 古い枝はもう投稿済み。共通の親（m0, m1）を持つ本線は、m2b（index=4）から未投稿になる
+    assert branchy.unposted_start(branchy.get_line("c", through_index=2).messages) is None
+    assert branchy.unposted_start(branchy.get_line("c").messages) == 4
+
+
+def test_search_marks_posted_messages(branchy):
+    branchy.record_post("c", "hatena", "https://example.com/1", "タイトル", ["m0", "m1"])
+
+    page = branchy.search_messages(["テストの答え"])
+
+    assert [(h.position, h.posted) for h in page.items] == [(1, True)]
+
+
+def test_list_conversations_shows_post_and_unposted_counts(branchy):
+    branchy.record_post("c", "hatena", "https://example.com/1", "タイトル", ["m0", "m1"])
+
+    info = branchy.list_conversations(uuid="c").items[0]
+
+    assert (info.post_count, info.main_line_unposted_count) == (1, 3)  # 本線は5件、投稿済みは m0, m1 の2件
+
+
+def test_list_conversations_without_post_has_zero_counts(store):
+    info = store.list_conversations(uuid="c-python").items[0]
+
+    assert (info.post_count, info.main_line_unposted_count) == (0, 3)

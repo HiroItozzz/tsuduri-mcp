@@ -58,6 +58,8 @@ def render_search(page: Page[MessageHit], offset: int, max_chars: int, keywords:
         )
         if not hit.on_main_line:
             heading += f" ［本線外。through_index={hit.position} でこの枝を読める］"
+        if hit.posted:
+            heading += " ［投稿済み］"
         lines.append(heading)
         lines.append(excerpt(hit.text, max_chars, keywords) or "（本文なし）")
     return "\n".join(lines)
@@ -74,6 +76,7 @@ def render_conversation_list(page: Page[ConversationSummary], offset: int) -> st
                 if c.message_count and not c.text_message_count
                 else ""
             )
+            + (f" | 投稿 {c.post_count} 件・本線の未投稿 {c.main_line_unposted_count} 件" if c.post_count else "")
         )
     return "\n".join(lines)
 
@@ -203,6 +206,18 @@ def render_summary(
 ) -> str:
     lines = render_summary_header(info, messages, summary, "要約", cached)
     return "\n".join(lines) + "\n\n" + summary.content
+
+
+def skip_note(first_position: int, start: int) -> str | None:
+    """draft_blog_post が start を省いた既定値（未投稿の始まり）に決めたとき、飛ばした範囲の注記。
+
+    投稿済みの部分を飛ばしていなければ（start が線の最初の index のままなら）None。
+    """
+    if start <= first_position:
+        return None
+    return (
+        f"index {first_position}〜{start - 1} は投稿済みなので index {start} から下書きにした（全部使うなら start=0）"
+    )
 
 
 def render_blog_draft(

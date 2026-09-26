@@ -167,3 +167,37 @@ def test_message_missing_note_is_removed_when_message_comes_back(store, tmp_path
     messages = store.get_messages("c1")
     m2 = next(pm for pm in messages if pm.message.uuid == "m2")
     assert m2.notes == []
+
+
+# --- ブログ投稿の記録 ---
+
+
+def test_unposted_start_without_any_post_is_zero(store, tmp_path):
+    import_raw(store, tmp_path, [two_turns()])
+
+    assert store.unposted_start(store.get_line("c1").messages) == 0
+
+
+def test_unposted_start_after_partial_post(store, tmp_path):
+    import_raw(store, tmp_path, [two_turns()])
+    store.record_post("c1", "hatena", "https://example.com/1", "タイトル", ["m1"])
+
+    assert store.unposted_start(store.get_line("c1").messages) == 1
+
+
+def test_unposted_start_when_fully_posted_is_none(store, tmp_path):
+    import_raw(store, tmp_path, [two_turns()])
+    store.record_post("c1", "hatena", "https://example.com/1", "タイトル", ["m1", "m2"])
+
+    assert store.unposted_start(store.get_line("c1").messages) is None
+
+
+def test_record_post_saves_service_url_title(store, tmp_path):
+    import_raw(store, tmp_path, [two_turns()])
+
+    post_id = store.record_post("c1", "hatena", "https://example.com/1", "タイトル", ["m1", "m2"])
+
+    row = store.conn.execute("SELECT service, url, title FROM posts WHERE id = ?", (post_id,)).fetchone()
+    assert (row["service"], row["url"], row["title"]) == ("hatena", "https://example.com/1", "タイトル")
+    rows = store.conn.execute("SELECT message_uuid FROM post_messages WHERE post_id = ?", (post_id,))
+    assert {r["message_uuid"] for r in rows} == {"m1", "m2"}

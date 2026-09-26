@@ -33,6 +33,7 @@ claude.ai の過去の会話履歴を検索・閲覧するサーバー。
 - 会話の中身を知りたいだけなら、summarize_conversation で Gemini に要約させるとコンテキストを節約できる
   （要約は保存され、2回目からは Gemini を呼ばない）
 - ブログの下書きは draft_blog_post（Gemini）か prompt の draft_blog_with_claude で作る。どちらも投稿はしない
+- 下書きを投稿したら record_blog_post で範囲を記録する。次の draft_blog_post は続きから作れる
 """
 
 MAX_LIMIT = 100
@@ -154,6 +155,8 @@ ThroughIndex = Annotated[
 ]
 AllBranches = Annotated[bool, Field(description="true なら枝を選ばず、すべての枝を index 順に並べる")]
 
+Service = Literal["hatena", "qiita", "devto", "other"]
+
 
 def load_scope(
     store: ConversationStore, conversation_uuid: str, through_index: int | None, all_branches: bool
@@ -271,19 +274,39 @@ async def summarize_conversation(
     return render.render_summary(info, messages, summary, cached=False)
 
 
+def resolve_draft_start(conversation_uuid: str, through_index: int | None, start: int | None) -> tuple[int, str | None]:
+    """draft_blog_post の start。省いたら、線の上でまだ投稿していない部分の始まりにする。
+
+    飛ばした範囲があれば注記も返す（なければ None）。
+    """
+    if start is not None:
+        return start, None
+    with open_store() as store:
+        line = store.get_line(conversation_uuid, through_index)
+        if not line.messages:
+            raise ValueError("メッセージがありません")
+        unposted = store.unposted_start(line.messages)
+        if unposted is None:
+            raise ValueError("この枝はすでに全部投稿済みです（start=0 で全部を材料にできます）")
+    return unposted, render.skip_note(line.messages[0].position, unposted)
+
+
 @mcp.tool(structured_output=False)
 async def draft_blog_post(
     conversation_uuid: str,
     through_index: ThroughIndex = None,
     start: Annotated[
-        int, Field(ge=0, description="この index 以降だけを下書きの材料にする（選んだ枝の上の index）")
-    ] = 0,
+        int | None,
+        Field(ge=0, description="この index 以降だけを下書きの材料にする（省くと、まだ投稿していない部分から）"),
+    ] = None,
     refresh: Annotated[bool, Field(description="保存済みの下書きがあっても作り直す")] = False,
 ) -> str:
     """Gemini でブログの下書き（タイトル・本文・カテゴリー）を作る。投稿はしない。
 
     下書きは保存され、2回目からは Gemini を呼ばない。
+    投稿したら、下書きに使った範囲（戻り値の index a〜b）で record_blog_post を呼んで記録する。
     """
+    start, note = resolve_draft_start(conversation_uuid, through_index, start)
     info, messages, transcript = load_transcript(conversation_uuid, through_index, start)
 
     instructions = llm.load_prompt("blog")
@@ -300,13 +323,62 @@ async def draft_blog_post(
             cached = store.find_summary(key)
         if cached is not None:
             draft = llm.BlogDraft.model_validate_json(cached.content)
-            return render.render_blog_draft(info, messages, cached, draft, cached=True)
+            text = render.render_blog_draft(info, messages, cached, draft, cached=True)
+            return f"{note}\n\n{text}" if note else text
 
     result = await llm.generate(make_model(DRAFT_MODEL), instructions, transcript, llm.BlogDraft)
     summary = Summary(key, result.output.model_dump_json(), result.input_tokens, result.output_tokens, now_db())
     with open_store() as store:
         store.save_summary(summary)
-    return render.render_blog_draft(info, messages, summary, result.output, cached=False)
+    text = render.render_blog_draft(info, messages, summary, result.output, cached=False)
+    return f"{note}\n\n{text}" if note else text
+
+
+@mcp.tool(structured_output=False)
+def record_blog_post(
+    conversation_uuid: str,
+    service: Service,
+    url: str,
+    title: str,
+    through_index: ThroughIndex = None,
+    start: Annotated[
+        int | None, Field(ge=0, description="記録する範囲の始まり（省くと、まだ投稿していない部分の始まり）")
+    ] = None,
+    end: Annotated[
+        int | None, Field(ge=0, description="記録する範囲の終わり。含む（省くと選んだ枝の最後の index）")
+    ] = None,
+) -> str:
+    """draft_blog_post で作った下書きを投稿したら、同じ範囲で呼んで記録する。投稿自体はしない。
+
+    記録した範囲は、次回の draft_blog_post の既定の start や、list_conversations・search_messages の
+    「投稿済み」表示に使われる。
+    """
+    with open_store() as store:
+        info = find_conversation(store, conversation_uuid)
+        line = store.get_line(conversation_uuid, through_index)
+        if not line.messages:
+            raise ValueError("メッセージがありません")
+        positions = {pm.position for pm in line.messages}
+        first, last = line.messages[0].position, line.messages[-1].position
+        if start is None:
+            unposted = store.unposted_start(line.messages)
+            if unposted is None:
+                raise ValueError("この枝はすでに全部投稿済みです。start を指定してください")
+            start = unposted
+        if end is None:
+            end = last
+        if start not in positions:
+            raise ValueError(f"index={start} はこの枝にありません（{first}〜{last}）")
+        if end not in positions:
+            raise ValueError(f"index={end} はこの枝にありません（{first}〜{last}）")
+        if start > end:
+            raise ValueError(f"start（{start}）が end（{end}）より後ろです")
+        message_uuids = [pm.message.uuid for pm in line.messages if start <= pm.position <= end]
+        store.record_post(conversation_uuid, service, url, title, message_uuids)
+    return (
+        f"「{render.conversation_title(info.name, info.first_human_text)}」 conversation={conversation_uuid} の "
+        f"index {start}〜{end} を {service} への投稿として記録しました: {url}"
+    )
 
 
 # --- MCP クライアント（Claude など）が自分で読んで書くための prompt ---
