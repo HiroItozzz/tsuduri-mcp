@@ -15,6 +15,10 @@ def _to_db(dt: datetime) -> str:
     return dt.astimezone(UTC).strftime(DB_FORMAT)
 
 
+def now_db() -> str:
+    return _to_db(datetime.now(UTC))
+
+
 def since_to_db(value: str, tz: tzinfo | None = None) -> str:
     """`2026-09-20` はその日の 0 時（ローカル時刻）から。"""
     return _to_db(_parse(value, tz or local_tz()))

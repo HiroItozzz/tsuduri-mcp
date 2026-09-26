@@ -7,7 +7,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from .dates import db_to_local
-from .store import ConversationSummary, MessageHit, Page, PositionedMessage
+from .store import ConversationSummary, MessageHit, Page, PositionedMessage, Summary
 
 UNTITLED = "（タイトルなし）"
 
@@ -140,6 +140,31 @@ def render_markdown(info: ConversationSummary, scope: Scope, include_details: bo
         for a in m.attachments:
             lines += ["", f"[添付: {a.get('file_name', '')}]", a.get("extracted_content", "")]
     return "\n".join(lines) + "\n"
+
+
+def render_transcript(info: ConversationSummary, messages: Sequence[PositionedMessage]) -> str:
+    """LLM に渡す会話ログ。本文だけで、見出しに index を付ける。"""
+    lines = [f"# {conversation_title(info.name, info.first_human_text)}"]
+    for pm in messages:
+        m = pm.message
+        lines += ["", f"### index={pm.position} {m.sender} {db_to_local(m.created_at)}", m.text or _describe_empty(pm)]
+        lines += [f"[添付: {a.get('file_name', '')}]" for a in m.attachments]
+    return "\n".join(lines)
+
+
+def render_summary(
+    info: ConversationSummary, messages: Sequence[PositionedMessage], summary: Summary, cached: bool
+) -> str:
+    key = summary.key
+    lines = [
+        f"「{conversation_title(info.name, info.first_human_text)}」 conversation={info.uuid}",
+        f"index {messages[0].position}〜{messages[-1].position}（{len(messages)} 件）の要約",
+        f"{key.model} / 入力 {summary.input_tokens} トークン・出力 {summary.output_tokens} トークン"
+        f" / 作成 {db_to_local(summary.created_at)}",
+    ]
+    if cached:
+        lines.append("保存済みの要約を返しました（作り直すときは refresh=true）")
+    return "\n".join(lines) + "\n\n" + summary.content
 
 
 def _render_block(block: dict) -> str:

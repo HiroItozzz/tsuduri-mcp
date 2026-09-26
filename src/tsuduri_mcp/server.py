@@ -1,15 +1,17 @@
+import hashlib
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import Annotated, Literal
 
 from mcp.server.mcpserver import MCPServer
 from pydantic import Field
+from pydantic_ai.models import Model
 
-from . import render
-from .dates import since_to_db, until_to_db
-from .store import ConversationStore, ConversationSummary, connect, default_db_path
+from . import llm, render
+from .dates import now_db, since_to_db, until_to_db
+from .store import ConversationStore, ConversationSummary, Summary, SummaryKey, connect, default_db_path
 
 INSTRUCTIONS = """\
 claude.ai の過去の会話履歴を検索・閲覧するサーバー。
@@ -20,10 +22,16 @@ claude.ai の過去の会話履歴を検索・閲覧するサーバー。
 - 長い会話を丸ごと読むときは、AI がファイルを読める環境なら export_conversation でファイルに書き出してから読む
 - 日付はローカル時刻の YYYY-MM-DD（または ISO 8601 の日時）で指定する。表示もローカル時刻
 - index は会話の中でのメッセージの番号（0 始まり）
+- 会話の中身を知りたいだけなら、summarize_conversation で Gemini に要約させるとコンテキストを節約できる
+  （要約は保存され、2回目からは Gemini を呼ばない）
 """
 
 MAX_LIMIT = 100
 EXPORT_DIR = Path(tempfile.gettempdir()) / "tsuduri-mcp"
+MAX_INPUT_CHARS = 600_000  # いちばん長い会話の本線でも約 36 万文字（2026-09 時点）
+
+SUMMARY_MODEL = llm.DEFAULT_GEMINI_MODEL
+make_model: Callable[[str], Model] = llm.gemini  # テストでは通信しないモデルに差し替える
 
 mcp = MCPServer("tsuduri", instructions=INSTRUCTIONS)
 
@@ -173,6 +181,54 @@ def export_conversation(
     path = EXPORT_DIR / f"{conversation_uuid}.md"
     path.write_text(text, encoding="utf-8")
     return f"{path} に書き出しました（{len(scope.messages)} 件、{len(text)} 文字、{text.count(chr(10))} 行）"
+
+
+def prompt_hash(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()[:16]
+
+
+@mcp.tool(structured_output=False)
+async def summarize_conversation(
+    conversation_uuid: str,
+    through_index: ThroughIndex = None,
+    start: Annotated[int, Field(ge=0, description="この index 以降だけを要約する")] = 0,
+    refresh: Annotated[bool, Field(description="保存済みの要約があっても作り直す")] = False,
+) -> str:
+    """会話の1本の枝を Gemini で要約する。
+
+    原文をコンテキストに入れずに中身を把握できる。要約には話題ごとの index が付くので、
+    詳しく読みたいところだけ get_messages で読みに行ける。
+    同じ範囲の要約は保存してあり、2回目からは Gemini を呼ばずに返す。
+    """
+    with open_store() as store:
+        info = find_conversation(store, conversation_uuid)
+        messages = [pm for pm in store.get_line(conversation_uuid, through_index).messages if pm.position >= start]
+    if not messages:
+        raise ValueError(f"index={start} 以降のメッセージがありません")
+    transcript = render.render_transcript(info, messages)
+    if len(transcript) > MAX_INPUT_CHARS:
+        raise ValueError(f"会話が長すぎます（{len(transcript)} 文字）。start で範囲をしぼってください")
+
+    instructions = llm.load_prompt("summary")
+    key = SummaryKey(
+        conversation_uuid=conversation_uuid,
+        first_message_uuid=messages[0].message.uuid,
+        last_message_uuid=messages[-1].message.uuid,
+        kind="summary",
+        model=SUMMARY_MODEL,
+        prompt_hash=prompt_hash(instructions),
+    )
+    if not refresh:
+        with open_store() as store:
+            cached = store.find_summary(key)
+        if cached is not None:
+            return render.render_summary(info, messages, cached, cached=True)
+
+    result = await llm.generate(make_model(SUMMARY_MODEL), instructions, transcript, str)
+    summary = Summary(key, result.output, result.input_tokens, result.output_tokens, now_db())
+    with open_store() as store:
+        store.save_summary(summary)
+    return render.render_summary(info, messages, summary, cached=False)
 
 
 def main() -> None:
