@@ -59,6 +59,7 @@ def connect(path: Path | str) -> sqlite3.Connection:
     if str(path) != ":memory:":
         Path(path).parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
+    conn.row_factory = sqlite3.Row  # 列を名前で取り出す
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
@@ -102,6 +103,43 @@ class PositionedMessage:
 class Page[T]:
     total: int
     items: list[T]
+
+
+class _Where:
+    """WHERE 句と、そのプレースホルダに渡す値を組み立てる。"""
+
+    def __init__(self) -> None:
+        self.clauses: list[str] = []
+        self.params: list[object] = []
+
+    def add(self, clause: str, *params: object) -> None:
+        self.clauses.append(clause)
+        self.params.extend(params)
+
+    def add_if_given(self, clause: str, value: object) -> None:
+        if value is not None:
+            self.add(clause, value)
+
+    @property
+    def sql(self) -> str:
+        return " AND ".join(self.clauses) or "1"
+
+
+def _like_pattern(term: str) -> str:
+    escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
+def _text_contains(term: str) -> tuple[str, str]:
+    """本文に term を含む、という条件の SQL と値。"""
+    if len(term) >= FTS_MIN_CHARS:
+        phrase = '"' + term.replace('"', '""') + '"'  # フレーズとして渡し、FTS の演算子を無効にする
+        return "m.id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?)", phrase
+    return "m.text LIKE ? ESCAPE '\\'", _like_pattern(term)
+
+
+def _direction(order: Literal["newest", "oldest"]) -> str:
+    return "DESC" if order == "newest" else "ASC"
 
 
 class ConversationStore:
@@ -178,43 +216,30 @@ class ConversationStore:
         offset: int = 0,
     ) -> Page[MessageHit]:
         """本文の部分一致で探す。since は以上、until は未満（どちらも UTC の ISO 文字列）。"""
-        where, params = [], []
-        terms = [k for k in keywords if k]
-        if terms:
-            conds = [self._contains(t, params) for t in terms]
-            where.append("(" + (" AND " if match == "all" else " OR ").join(conds) + ")")
-        for term in (e for e in exclude if e):
-            where.append("NOT " + self._contains(term, params))
-        for sql, value in (
-            ("m.sender = ?", sender),
-            ("m.created_at >= ?", since),
-            ("m.created_at < ?", until),
-            ("m.conversation_uuid = ?", conversation_uuid),
-        ):
-            if value is not None:
-                where.append(sql)
-                params.append(value)
-        where_sql = " AND ".join(where) or "1"
-        direction = "DESC" if order == "newest" else "ASC"
+        where = _Where()
+        conditions = [_text_contains(k) for k in keywords if k]
+        if conditions:
+            joiner = " AND " if match == "all" else " OR "
+            where.add("(" + joiner.join(sql for sql, _ in conditions) + ")", *(value for _, value in conditions))
+        for term in exclude:
+            if term:
+                sql, value = _text_contains(term)
+                where.add(f"NOT {sql}", value)
+        where.add_if_given("m.sender = ?", sender)
+        where.add_if_given("m.created_at >= ?", since)
+        where.add_if_given("m.created_at < ?", until)
+        where.add_if_given("m.conversation_uuid = ?", conversation_uuid)
 
-        total = self.conn.execute(f"SELECT count(*) FROM messages m WHERE {where_sql}", params).fetchone()[0]
+        total = self.conn.execute(f"SELECT count(*) FROM messages m WHERE {where.sql}", where.params).fetchone()[0]
         rows = self.conn.execute(
-            f"""SELECT m.conversation_uuid, c.name, m.position, m.sender, m.created_at, m.text
+            f"""SELECT m.conversation_uuid, c.name AS conversation_name, m.position, m.sender, m.created_at, m.text
                 FROM messages m JOIN conversations c ON c.uuid = m.conversation_uuid
-                WHERE {where_sql}
-                ORDER BY m.created_at {direction}, m.position {direction}
+                WHERE {where.sql}
+                ORDER BY m.created_at {_direction(order)}, m.position {_direction(order)}
                 LIMIT ? OFFSET ?""",
-            [*params, limit, offset],
+            [*where.params, limit, offset],
         ).fetchall()
-        return Page(total, [MessageHit(*r) for r in rows])
-
-    @staticmethod
-    def _contains(term: str, params: list) -> str:
-        if len(term) >= FTS_MIN_CHARS:
-            params.append('"' + term.replace('"', '""') + '"')  # フレーズとして渡し、FTS の演算子を無効にする
-            return "m.id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?)"
-        params.append("%" + term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%")
-        return "m.text LIKE ? ESCAPE '\\'"
+        return Page(total, [MessageHit(**row) for row in rows])
 
     def list_conversations(
         self,
@@ -228,50 +253,55 @@ class ConversationStore:
         offset: int = 0,
     ) -> Page[ConversationSummary]:
         """期間に動きのあった会話（作成が until より前、かつ最終更新が since 以降）を返す。"""
-        where, params = [], []
-        for sql, value in (("c.updated_at >= ?", since), ("c.created_at < ?", until), ("c.uuid = ?", uuid)):
-            if value is not None:
-                where.append(sql)
-                params.append(value)
+        where = _Where()
+        where.add_if_given("c.updated_at >= ?", since)
+        where.add_if_given("c.created_at < ?", until)
+        where.add_if_given("c.uuid = ?", uuid)
         if title:
-            where.append("c.name LIKE ? ESCAPE '\\'")
-            params.append("%" + title.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%")
-        where_sql = " AND ".join(where) or "1"
-        direction = "DESC" if order == "newest" else "ASC"
+            where.add("c.name LIKE ? ESCAPE '\\'", _like_pattern(title))
 
-        total = self.conn.execute(f"SELECT count(*) FROM conversations c WHERE {where_sql}", params).fetchone()[0]
+        total = self.conn.execute(f"SELECT count(*) FROM conversations c WHERE {where.sql}", where.params).fetchone()[0]
         rows = self.conn.execute(
             f"""SELECT c.uuid, c.name, c.created_at, c.updated_at,
-                       (SELECT count(*) FROM messages m WHERE m.conversation_uuid = c.uuid),
+                       (SELECT count(*) FROM messages m WHERE m.conversation_uuid = c.uuid) AS message_count,
                        coalesce((SELECT m.text FROM messages m
                                  WHERE m.conversation_uuid = c.uuid AND m.sender = 'human' AND m.text != ''
-                                 ORDER BY m.position LIMIT 1), '')
-                FROM conversations c WHERE {where_sql}
-                ORDER BY c.updated_at {direction}
+                                 ORDER BY m.position LIMIT 1), '') AS first_human_text
+                FROM conversations c WHERE {where.sql}
+                ORDER BY c.updated_at {_direction(order)}
                 LIMIT ? OFFSET ?""",
-            [*params, limit, offset],
+            [*where.params, limit, offset],
         ).fetchall()
-        return Page(total, [ConversationSummary(*r) for r in rows])
+        return Page(total, [ConversationSummary(**row) for row in rows])
 
     def get_messages(self, conversation_uuid: str, start: int = 0, count: int | None = None) -> list[PositionedMessage]:
         rows = self.conn.execute(
-            """SELECT m.position, p.position, m.uuid, m.sender, m.text, m.created_at, m.updated_at, m.parent_uuid,
+            """SELECT m.position, p.position AS parent_position,
+                      m.uuid, m.sender, m.text, m.created_at, m.updated_at, m.parent_uuid,
                       m.raw_content, m.attachments, m.files
                FROM messages m LEFT JOIN messages p ON p.uuid = m.parent_uuid
                WHERE m.conversation_uuid = ? AND m.position >= ?
                ORDER BY m.position
                LIMIT ?""",
-            (conversation_uuid, start, -1 if count is None else count),
+            (conversation_uuid, start, -1 if count is None else count),  # LIMIT -1 は上限なし
         ).fetchall()
         return [
             PositionedMessage(
-                position=r[0],
-                parent_position=r[1],
+                position=row["position"],
+                parent_position=row["parent_position"],
                 message=Message(
-                    *r[2:8], raw_content=json.loads(r[8]), attachments=json.loads(r[9]), files=json.loads(r[10])
+                    uuid=row["uuid"],
+                    sender=row["sender"],
+                    text=row["text"],
+                    created_at=row["created_at"],
+                    updated_at=row["updated_at"],
+                    parent_uuid=row["parent_uuid"],
+                    raw_content=json.loads(row["raw_content"]),
+                    attachments=json.loads(row["attachments"]),
+                    files=json.loads(row["files"]),
                 ),
             )
-            for r in rows
+            for row in rows
         ]
 
     def get_conversation(self, uuid: str) -> Conversation | None:
@@ -280,4 +310,4 @@ class ConversationStore:
         ).fetchone()
         if row is None:
             return None
-        return Conversation(*row, messages=[pm.message for pm in self.get_messages(uuid)])
+        return Conversation(**row, messages=[pm.message for pm in self.get_messages(uuid)])

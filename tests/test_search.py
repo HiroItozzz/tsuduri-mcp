@@ -129,3 +129,7 @@ def test_get_messages_range(store):
     assert [(pm.position, pm.parent_position, pm.message.text) for pm in messages] == [
         (1, 0, "リストは参照が共有されます")
     ]
+
+
+def test_short_keyword_with_like_wildcard_is_literal(store):
+    assert store.search_messages(["%"]).total == 0
