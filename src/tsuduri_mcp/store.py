@@ -42,6 +42,22 @@ CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
     text, content='messages', content_rowid='id', tokenize='trigram'
 );
 
+-- LLM による要約とブログの下書き。同じ範囲・種類・モデル・プロンプトなら作り直さずに使い回す
+CREATE TABLE IF NOT EXISTS summaries (
+    id                 INTEGER PRIMARY KEY,
+    conversation_uuid  TEXT NOT NULL REFERENCES conversations(uuid),
+    first_message_uuid TEXT NOT NULL REFERENCES messages(uuid),  -- 1本の線の上の範囲の始まり
+    last_message_uuid  TEXT NOT NULL REFERENCES messages(uuid),  -- 範囲の終わり
+    kind               TEXT NOT NULL,  -- 'summary' / 'blog_draft'
+    model              TEXT NOT NULL,
+    prompt_hash        TEXT NOT NULL,  -- プロンプトを直したら作り直すため
+    content            TEXT NOT NULL,  -- 要約は本文、下書きは JSON
+    input_tokens       INTEGER NOT NULL,
+    output_tokens      INTEGER NOT NULL,
+    created_at         TEXT NOT NULL,
+    UNIQUE (first_message_uuid, last_message_uuid, kind, model, prompt_hash)
+);
+
 -- メッセージは追加だけで、更新・削除はしない（docs/design.md）
 CREATE TRIGGER IF NOT EXISTS messages_fts_insert AFTER INSERT ON messages BEGIN
     INSERT INTO messages_fts(rowid, text) VALUES (new.id, new.text);
@@ -97,6 +113,25 @@ class PositionedMessage:
     position: int
     parent_position: int | None
     message: Message
+
+
+@dataclass
+class SummaryKey:
+    conversation_uuid: str
+    first_message_uuid: str
+    last_message_uuid: str
+    kind: str
+    model: str
+    prompt_hash: str
+
+
+@dataclass
+class Summary:
+    key: SummaryKey
+    content: str
+    input_tokens: int
+    output_tokens: int
+    created_at: str
 
 
 @dataclass
@@ -354,6 +389,41 @@ class ConversationStore:
             leaf = by_uuid.get(parent) if parent is not None else None
         leaf_count = sum(1 for pm in messages if pm.message.uuid not in children)
         return Line(line[::-1], leaf_count)
+
+    # --- 要約 ---
+
+    def find_summary(self, key: SummaryKey) -> Summary | None:
+        row = self.conn.execute(
+            """SELECT content, input_tokens, output_tokens, created_at FROM summaries
+               WHERE first_message_uuid = ? AND last_message_uuid = ? AND kind = ? AND model = ? AND prompt_hash = ?""",
+            (key.first_message_uuid, key.last_message_uuid, key.kind, key.model, key.prompt_hash),
+        ).fetchone()
+        return None if row is None else Summary(key, **row)
+
+    def save_summary(self, summary: Summary) -> None:
+        """同じキーがあれば上書きする（作り直したとき）。"""
+        key = summary.key
+        with self.conn:
+            self.conn.execute(
+                """INSERT INTO summaries (conversation_uuid, first_message_uuid, last_message_uuid, kind, model,
+                                          prompt_hash, content, input_tokens, output_tokens, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT (first_message_uuid, last_message_uuid, kind, model, prompt_hash) DO UPDATE SET
+                       content = excluded.content, input_tokens = excluded.input_tokens,
+                       output_tokens = excluded.output_tokens, created_at = excluded.created_at""",
+                (
+                    key.conversation_uuid,
+                    key.first_message_uuid,
+                    key.last_message_uuid,
+                    key.kind,
+                    key.model,
+                    key.prompt_hash,
+                    summary.content,
+                    summary.input_tokens,
+                    summary.output_tokens,
+                    summary.created_at,
+                ),
+            )
 
     def get_conversation(self, uuid: str) -> Conversation | None:
         row = self.conn.execute(
