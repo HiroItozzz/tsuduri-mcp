@@ -133,3 +133,56 @@ def test_get_messages_range(store):
 
 def test_short_keyword_with_like_wildcard_is_literal(store):
     assert store.search_messages(["%"]).total == 0
+
+
+# --- get_line ---
+
+
+@pytest.fixture
+def branchy(tmp_path):
+    #  m0 ─ m1 ─ m2 ─ m3           （m2 が再生成されて m2b に分岐）
+    #            └ m2b ─ m3b ─ m4b （こちらが新しい）
+    msgs = [
+        raw_message("m0", text="テストの質問", created_at=at(1, 0)),
+        raw_message("m1", sender="assistant", text="テストの答え", parent="m0", created_at=at(1, 1)),
+        raw_message("m2", text="テストの続き", parent="m1", created_at=at(1, 2)),
+        raw_message("m3", sender="assistant", text="古い枝の答え", parent="m2", created_at=at(1, 3)),
+        raw_message("m2b", text="言い直したテストの続き", parent="m1", created_at=at(1, 4)),
+        raw_message("m3b", sender="assistant", text="新しい枝の答え", parent="m2b", created_at=at(1, 5)),
+        raw_message("m4b", text="新しい枝のさらに続き", parent="m3b", created_at=at(1, 6)),
+    ]
+    path = tmp_path / "conversations.json"
+    path.write_text(json.dumps([raw_conversation("c", msgs)], ensure_ascii=False), encoding="utf-8")
+    conn = connect(":memory:")
+    s = ConversationStore(conn)
+    s.import_conversations(ClaudeExportSource(path).load())
+    yield s
+    conn.close()
+
+
+def uuids(line):
+    return [pm.message.uuid for pm in line.messages]
+
+
+def test_line_defaults_to_newest_branch(branchy):
+    line = branchy.get_line("c")
+
+    assert uuids(line) == ["m0", "m1", "m2b", "m3b", "m4b"]
+    assert line.leaf_count == 2
+
+
+def test_line_through_old_branch_follows_it_to_the_end(branchy):
+    assert uuids(branchy.get_line("c", through_index=2)) == ["m0", "m1", "m2", "m3"]
+
+
+def test_line_through_common_part_takes_newest_continuation(branchy):
+    assert uuids(branchy.get_line("c", through_index=1)) == ["m0", "m1", "m2b", "m3b", "m4b"]
+
+
+def test_line_unknown_index_is_error(branchy):
+    with pytest.raises(ValueError):
+        branchy.get_line("c", through_index=99)
+
+
+def test_line_of_empty_conversation(store):
+    assert store.get_line("存在しないテストの会話").messages == []

@@ -100,6 +100,14 @@ class PositionedMessage:
 
 
 @dataclass
+class Line:
+    """会話の中の1本の線（枝分かれを1つに決めたもの）。"""
+
+    messages: list[PositionedMessage]
+    leaf_count: int  # 会話全体の枝の数。1 なら枝分かれなし
+
+
+@dataclass
 class Page[T]:
     total: int
     items: list[T]
@@ -303,6 +311,49 @@ class ConversationStore:
             )
             for row in rows
         ]
+
+    def get_line(self, conversation_uuid: str, through_index: int | None = None) -> Line:
+        """through_index のメッセージを通る線を返す。
+
+        そのメッセージより前は親をたどり、後はいちばん新しい続きをたどる。
+        through_index を省くと、会話でいちばん新しいメッセージを通る線（本線）になる。
+        """
+        messages = self.get_messages(conversation_uuid)
+        if not messages:
+            return Line([], 0)
+        by_uuid = {pm.message.uuid: pm for pm in messages}
+        children: dict[str, list[PositionedMessage]] = {}
+        for pm in messages:
+            if pm.message.parent_uuid in by_uuid:
+                children.setdefault(pm.message.parent_uuid, []).append(pm)
+
+        def newest(pms: Iterable[PositionedMessage]) -> PositionedMessage:
+            return max(pms, key=lambda pm: (pm.message.created_at, pm.position))
+
+        if through_index is None:
+            through = newest(messages)
+        else:
+            found = [pm for pm in messages if pm.position == through_index]
+            if not found:
+                raise ValueError(f"index={through_index} のメッセージはありません（0〜{len(messages) - 1}）")
+            through = found[0]
+
+        # 後ろ: through の子孫のうち、いちばん新しいものを終点にする
+        descendants, stack = [through], [through]
+        while stack:
+            kids = children.get(stack.pop().message.uuid, [])
+            descendants += kids
+            stack += kids
+        leaf: PositionedMessage | None = newest(descendants)
+
+        # 前: 終点から親をたどる
+        line = []
+        while leaf is not None:
+            line.append(leaf)
+            parent = leaf.message.parent_uuid
+            leaf = by_uuid.get(parent) if parent is not None else None
+        leaf_count = sum(1 for pm in messages if pm.message.uuid not in children)
+        return Line(line[::-1], leaf_count)
 
     def get_conversation(self, uuid: str) -> Conversation | None:
         row = self.conn.execute(
