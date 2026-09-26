@@ -203,6 +203,13 @@ ruff（リント・整形）と ty（型チェック）。`uv run ruff check . &
 
 ## 未決定
 
+- レビュー（2026-09-27）の残り
+  - DB を使わない枝の計算（`_Node`・`_select_line`・枝の数・未投稿の始まりの後半・範囲の検証）を `lines.py` に出す。store.py は SQL だけにし、枝分かれのテストを DB なしで書けるようにする
+  - 根が複数ある会話で、draft・record・post の既定の範囲を確かめるテスト（実データに 39 件ある）
+  - 飛ばした範囲の注記（`skip_note`）が、途中だけ投稿したときに範囲を言い切ってしまう。「index k より前に投稿済みの部分があるので k から」のように直す
+  - SQL: 期間で絞った一覧を `c.uuid IN (SELECT conversation_uuid FROM messages WHERE created_at …)` にする（初回が最大 4 秒）、`posts(conversation_uuid)` の索引、取り込みの最後に `PRAGMA optimize`
+- 下書きを公開に変える PUT（`app:draft` を必ず送る。カテゴリーも送り直す）。ほしくなったら
+- Windows の Claude デスクトップで試す（README に設定例あり）
 - 投稿の一覧を出すツールや、記録の取り消し。使ってみて必要なら
 - 枝の一覧を出すツール（各枝の最後の発言の冒頭と日時）。使ってみて必要なら
 - P3 の残り: Qiita / Dev.to
