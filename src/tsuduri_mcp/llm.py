@@ -42,9 +42,15 @@ class LlmResult[T]:
     output: T
     input_tokens: int
     output_tokens: int
+    cost_usd: float | None  # 料金（USD）。genai-prices がそのモデルを知らなければ None
 
 
 async def generate[T](model: Model, instructions: str, prompt: str, output_type: type[T]) -> LlmResult[T]:
     agent = Agent(model, instructions=instructions, output_type=output_type)
     result = await agent.run(prompt)
-    return LlmResult(result.output, result.usage.input_tokens, result.usage.output_tokens)
+    usage = result.usage
+    # 料金は pydantic-ai が genai-prices で best-effort に計算し、usage.cost に入れてくれる
+    # （thinking のトークンも、プロバイダごとの usage 抽出の中で込みになる）。
+    # 知らないモデル名でも例外にはならず None になるので、ここでは変換するだけでよい
+    cost_usd = float(usage.cost) if usage.cost is not None else None
+    return LlmResult(result.output, usage.input_tokens, usage.output_tokens, cost_usd)

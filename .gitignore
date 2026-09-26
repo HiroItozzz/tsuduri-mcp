@@ -25,3 +25,6 @@ assets/
 
 # 認証情報
 .env
+
+# ログ
+logs/

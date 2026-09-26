@@ -195,23 +195,39 @@ def render_transcript(info: ConversationSummary, messages: Sequence[PositionedMe
     return "\n".join(lines)
 
 
+def format_cost(cost_usd: float | None, cached: bool) -> str:
+    """generate_cached の結果を、料金の一言に変える。
+
+    保存済みを使ったときは Gemini を呼んでいないので、料金がかかっていないことがわかるようにする。
+    """
+    if cached:
+        return "保存済み（今回の料金なし）"
+    if cost_usd is None:
+        return "料金は不明"
+    return f"約 ${cost_usd:.4f}"
+
+
 def render_summary_header(
     info: ConversationSummary,
     messages: Sequence[PositionedMessage],
     summary: Summary,
     unit: str,
     cached: bool,
+    cost_usd: float | None = None,
     *,
     count_label: str | None = None,
 ) -> list[str]:
-    """count_label を省くと「N 件」。会話全体の件数と混同しやすいところ（下書き）では明示する。"""
+    """count_label を省くと「N 件」。会話全体の件数と混同しやすいところ（下書き）では明示する。
+
+    cost_usd は Gemini を実際に呼んだとき（cached=False）だけ渡す。保存済みのときは None のままでよい。
+    """
     key = summary.key
     count = count_label if count_label is not None else f"{len(messages)} 件"
     lines = [
         f"「{conversation_title(info.name, info.first_human_text)}」 conversation={info.uuid}",
         f"index {messages[0].position}〜{messages[-1].position}（{count}）の{unit}",
         f"{key.model} / 入力 {summary.input_tokens} トークン・出力 {summary.output_tokens} トークン"
-        f" / 作成 {db_to_local(summary.created_at)}",
+        f" / 作成 {db_to_local(summary.created_at)} / {format_cost(cost_usd, cached)}",
     ]
     if cached:
         lines.append(f"保存済みの{unit}を返しました（作り直すときは refresh=true）")
@@ -219,9 +235,13 @@ def render_summary_header(
 
 
 def render_summary(
-    info: ConversationSummary, messages: Sequence[PositionedMessage], summary: Summary, cached: bool
+    info: ConversationSummary,
+    messages: Sequence[PositionedMessage],
+    summary: Summary,
+    cached: bool,
+    cost_usd: float | None = None,
 ) -> str:
-    lines = render_summary_header(info, messages, summary, "要約", cached)
+    lines = render_summary_header(info, messages, summary, "要約", cached, cost_usd)
     return "\n".join(lines) + "\n\n" + summary.content
 
 
@@ -285,10 +305,11 @@ def render_blog_draft(
     draft: BlogDraft,
     cached: bool,
     through_index: int | None = None,
+    cost_usd: float | None = None,
 ) -> str:
     unit = "下書き"
     count_label = f"この枝の {len(messages)} 件"
-    lines = render_summary_header(info, messages, summary, unit, cached, count_label=count_label)
+    lines = render_summary_header(info, messages, summary, unit, cached, cost_usd, count_label=count_label)
     start, end = messages[0].position, messages[-1].position
     through_arg = f", through_index={through_index}" if through_index is not None else ""
     lines += [

@@ -219,6 +219,43 @@ def test_find_posted_overlap_reports_count_per_post(store, tmp_path):
     assert (overlaps[0].service, overlaps[0].title, overlaps[0].count) == ("hatena", "はてなの記事", 2)
 
 
+# --- LLM の呼び出し記録 ---
+
+
+def test_record_llm_call_and_list_llm_calls_round_trip(store, tmp_path):
+    import_raw(store, tmp_path, [two_turns()])
+
+    store.record_llm_call("summary", "c1", "gemini-3-flash-preview", 100, 20, 0.0015, "2026-01-01T00:00:00Z")
+
+    calls = store.list_llm_calls("c1")
+    assert len(calls) == 1
+    call = calls[0]
+    assert (call.kind, call.model, call.input_tokens, call.output_tokens) == (
+        "summary",
+        "gemini-3-flash-preview",
+        100,
+        20,
+    )
+    assert call.cost_usd == 0.0015
+
+
+def test_record_llm_call_allows_unknown_cost(store, tmp_path):
+    import_raw(store, tmp_path, [two_turns()])
+
+    store.record_llm_call("summary", "c1", "unknown-model", 10, 5, None, "2026-01-01T00:00:00Z")
+
+    assert store.list_llm_calls("c1")[0].cost_usd is None
+
+
+def test_list_llm_calls_filters_by_conversation(store, tmp_path):
+    import_raw(store, tmp_path, [two_turns(), raw_conversation("c2", [raw_message("m3", text="別会話")])])
+
+    store.record_llm_call("summary", "c1", "m", 1, 1, None, "2026-01-01T00:00:00Z")
+    store.record_llm_call("summary", "c2", "m", 1, 1, None, "2026-01-01T00:00:00Z")
+
+    assert [c.conversation_uuid for c in store.list_llm_calls("c1")] == ["c1"]
+
+
 # --- DB 接続 ---
 
 

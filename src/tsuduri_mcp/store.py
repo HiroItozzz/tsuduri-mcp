@@ -95,6 +95,18 @@ CREATE TABLE IF NOT EXISTS post_messages (
 );
 
 CREATE INDEX IF NOT EXISTS idx_post_messages_message ON post_messages(message_uuid);
+
+-- Gemini を実際に呼んだときだけ1行記録する（保存済みの要約・下書きを使ったときは記録しない）
+CREATE TABLE IF NOT EXISTS llm_calls (
+    id                INTEGER PRIMARY KEY,
+    kind              TEXT NOT NULL,  -- 'summary' / 'blog_draft'
+    conversation_uuid TEXT NOT NULL REFERENCES conversations(uuid),
+    model             TEXT NOT NULL,
+    input_tokens      INTEGER NOT NULL,
+    output_tokens     INTEGER NOT NULL,
+    cost_usd          REAL,           -- わからなければ NULL
+    created_at        TEXT NOT NULL
+);
 """
 
 FTS_MIN_CHARS = 3
@@ -185,6 +197,19 @@ class Summary:
     content: str
     input_tokens: int
     output_tokens: int
+    created_at: str
+
+
+@dataclass
+class LlmCall:
+    """実際に Gemini を呼んだ記録（llm_calls の1行）。料金の集計・表示に使う。"""
+
+    kind: str
+    conversation_uuid: str
+    model: str
+    input_tokens: int
+    output_tokens: int
+    cost_usd: float | None
     created_at: str
 
 
@@ -734,6 +759,36 @@ class ConversationStore:
                     summary.created_at,
                 ),
             )
+
+    def record_llm_call(
+        self,
+        kind: str,
+        conversation_uuid: str,
+        model: str,
+        input_tokens: int,
+        output_tokens: int,
+        cost_usd: float | None,
+        created_at: str,
+    ) -> None:
+        """Gemini を実際に呼んだときだけ呼ぶ（保存済みを使い回したときは呼ばない）。"""
+        with self.conn:
+            self.conn.execute(
+                """INSERT INTO llm_calls (kind, conversation_uuid, model, input_tokens, output_tokens,
+                                          cost_usd, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (kind, conversation_uuid, model, input_tokens, output_tokens, cost_usd, created_at),
+            )
+
+    def list_llm_calls(self, conversation_uuid: str | None = None) -> list[LlmCall]:
+        """記録された llm_calls を、記録した順に返す（テストや将来の集計用）。"""
+        where = _Where()
+        where.add_if_given("conversation_uuid = ?", conversation_uuid)
+        rows = self.conn.execute(
+            f"""SELECT kind, conversation_uuid, model, input_tokens, output_tokens, cost_usd, created_at
+                FROM llm_calls WHERE {where.sql} ORDER BY id""",
+            where.params,
+        ).fetchall()
+        return [LlmCall(**row) for row in rows]
 
     def get_conversation(self, uuid: str) -> Conversation | None:
         row = self.conn.execute(

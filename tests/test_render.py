@@ -1,7 +1,7 @@
 """render.py の純粋な関数のテスト（DB やファイルは使わない）"""
 
 from tsuduri_mcp.models import Message
-from tsuduri_mcp.render import Scope, branch_note, excerpt, note_lines, skip_note
+from tsuduri_mcp.render import Scope, branch_note, excerpt, format_cost, note_lines, skip_note
 from tsuduri_mcp.store import MessageNote, PositionedMessage
 
 # --- excerpt ---
@@ -96,3 +96,19 @@ def test_skip_note_describes_the_skipped_range():
     result = skip_note(first_position=0, start=3)
 
     assert result == "index 0〜2 は投稿済みなので index 3 から下書きにした（全部使うなら start=0）"
+
+
+# --- format_cost ---
+
+
+def test_format_cost_shows_cached_note_regardless_of_cost():
+    assert format_cost(0.0015, cached=True) == "保存済み（今回の料金なし）"
+    assert format_cost(None, cached=True) == "保存済み（今回の料金なし）"
+
+
+def test_format_cost_shows_unknown_when_cost_is_none():
+    assert format_cost(None, cached=False) == "料金は不明"
+
+
+def test_format_cost_formats_known_cost_to_four_decimals():
+    assert format_cost(0.015, cached=False) == "約 $0.0150"

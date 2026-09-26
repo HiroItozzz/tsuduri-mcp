@@ -1,7 +1,9 @@
 import functools
 import hashlib
 import inspect
+import logging
 import tempfile
+import time
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
@@ -13,7 +15,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import Field
 from pydantic_ai.models import Model
 
-from . import blog, llm, render
+from . import blog, llm, log, render
 from .dates import now_db, since_to_db, until_to_db
 from .store import (
     ConversationStore,
@@ -25,6 +27,8 @@ from .store import (
     connect,
     default_db_path,
 )
+
+logger = logging.getLogger(f"{log.LOGGER_NAME}.server")
 
 INSTRUCTIONS = """\
 claude.ai の過去の会話履歴を検索・閲覧するサーバー。
@@ -65,29 +69,61 @@ mcp = MCPServer("tsuduri", instructions=INSTRUCTIONS)
 # MCPServer は ToolError 以外の例外の文言を消してクライアントに返すので、入口で ToolError に変える
 CAUGHT_EXCEPTIONS = (ValueError, FileNotFoundError, RuntimeError)
 
+# ログに残す引数だけを選ぶ。会話の本文・検索キーワード・認証情報などは載せない
+LOGGED_TOOL_ARGS = ("conversation_uuid", "through_index", "start", "end", "service", "publish", "refresh")
+
+
+def _describe_args(fn: Callable[..., Any], args: tuple[Any, ...], kwargs: dict[str, Any]) -> str:
+    """ログに残す引数だけを "key=value" の並びにする。引数の対応付けに失敗しても例外にはしない。"""
+    try:
+        bound = inspect.signature(fn).bind(*args, **kwargs)
+        bound.apply_defaults()
+        values = bound.arguments
+    except TypeError:
+        values = kwargs
+    return " ".join(f"{name}={values[name]!r}" for name in LOGGED_TOOL_ARGS if name in values)
+
 
 def mcp_tool(fn: Callable[..., Any]) -> Callable[..., Any]:
     """`@mcp.tool(structured_output=False)` の代わりに使う、全ツール共通のデコレータ。
 
     引数の名前・説明・既定値（入力スキーマ）は元の関数のまま変わらない
     （functools.wraps で __wrapped__ を残し、シグネチャの取得はそちらに流れる）。
+    ツール名・一部の引数・かかった時間・成否をログに書く。
     """
+    name = getattr(fn, "__name__", repr(fn))  # Callable には __name__ がない場合もあるので getattr で逃がす
     if inspect.iscoroutinefunction(fn):
 
         @functools.wraps(fn)
         async def wrapper(*args: Any, **kwargs: Any) -> Any:
+            arg_desc = _describe_args(fn, args, kwargs)
+            started = time.monotonic()
             try:
-                return await fn(*args, **kwargs)
+                result = await fn(*args, **kwargs)
             except CAUGHT_EXCEPTIONS as e:
+                logger.exception("%s(%s) 失敗 %.3fs", name, arg_desc, time.monotonic() - started)
                 raise ToolError(str(e)) from e
+            except Exception:
+                logger.exception("%s(%s) 失敗 %.3fs", name, arg_desc, time.monotonic() - started)
+                raise
+            logger.info("%s(%s) 成功 %.3fs", name, arg_desc, time.monotonic() - started)
+            return result
     else:
 
         @functools.wraps(fn)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
+            arg_desc = _describe_args(fn, args, kwargs)
+            started = time.monotonic()
             try:
-                return fn(*args, **kwargs)
+                result = fn(*args, **kwargs)
             except CAUGHT_EXCEPTIONS as e:
+                logger.exception("%s(%s) 失敗 %.3fs", name, arg_desc, time.monotonic() - started)
                 raise ToolError(str(e)) from e
+            except Exception:
+                logger.exception("%s(%s) 失敗 %.3fs", name, arg_desc, time.monotonic() - started)
+                raise
+            logger.info("%s(%s) 成功 %.3fs", name, arg_desc, time.monotonic() - started)
+            return result
 
     return mcp.tool(structured_output=False)(wrapper)
 
@@ -293,6 +329,7 @@ class CachedGeneration[T]:
     output: T
     summary: Summary
     cached: bool  # 保存済みのものを使ったら True
+    cost_usd: float | None  # 実際に Gemini を呼んだときの料金（USD）。cached なら None
 
 
 async def generate_cached[T](
@@ -309,18 +346,52 @@ async def generate_cached[T](
 
     dump・load は、出力と summaries.content（文字列）との変換。
     Gemini を呼んでいる間（await）は DB を開いたままにしない。
+    実際に Gemini を呼んだときだけ、料金と一緒に llm_calls に1行記録する。
     """
     if not refresh:
         with open_store() as store:
             cached = store.find_summary(key)
         if cached is not None:
-            return CachedGeneration(load(cached.content), cached, True)
+            logger.info(
+                "generate_cached kind=%s model=%s conversation=%s range=%s..%s cached=True "
+                "input_tokens=%d output_tokens=%d",
+                key.kind,
+                key.model,
+                key.conversation_uuid,
+                key.first_message_uuid,
+                key.last_message_uuid,
+                cached.input_tokens,
+                cached.output_tokens,
+            )
+            return CachedGeneration(load(cached.content), cached, True, None)
 
     result = await llm.generate(make_model(model_name), instructions, transcript, output_type)
-    summary = Summary(key, dump(result.output), result.input_tokens, result.output_tokens, now_db())
+    created_at = now_db()
+    summary = Summary(key, dump(result.output), result.input_tokens, result.output_tokens, created_at)
     with open_store() as store:
         store.save_summary(summary)
-    return CachedGeneration(result.output, summary, False)
+        store.record_llm_call(
+            key.kind,
+            key.conversation_uuid,
+            model_name,
+            result.input_tokens,
+            result.output_tokens,
+            result.cost_usd,
+            created_at,
+        )
+    logger.info(
+        "generate_cached kind=%s model=%s conversation=%s range=%s..%s cached=False "
+        "input_tokens=%d output_tokens=%d cost_usd=%s",
+        key.kind,
+        key.model,
+        key.conversation_uuid,
+        key.first_message_uuid,
+        key.last_message_uuid,
+        result.input_tokens,
+        result.output_tokens,
+        result.cost_usd,
+    )
+    return CachedGeneration(result.output, summary, False, result.cost_usd)
 
 
 @mcp_tool
@@ -350,7 +421,9 @@ async def summarize_conversation(
         prompt_hash=prompt_hash(f"{TRANSCRIPT_VERSION}\n{instructions}"),
     )
     generated = await generate_cached(key, instructions, transcript, str, SUMMARY_MODEL, refresh, dump=str, load=str)
-    return render.render_summary(info, messages, generated.summary, cached=generated.cached)
+    return render.render_summary(
+        info, messages, generated.summary, cached=generated.cached, cost_usd=generated.cost_usd
+    )
 
 
 def resolve_draft_start(store: ConversationStore, line: Line, start: int | None) -> tuple[int, str | None]:
@@ -424,7 +497,13 @@ async def draft_blog_post(
         load=llm.BlogDraft.model_validate_json,
     )
     text = render.render_blog_draft(
-        info, messages, generated.summary, generated.output, cached=generated.cached, through_index=through_index
+        info,
+        messages,
+        generated.summary,
+        generated.output,
+        cached=generated.cached,
+        through_index=through_index,
+        cost_usd=generated.cost_usd,
     )
     return f"{header}\n\n{text}" if header else text
 
@@ -491,6 +570,15 @@ def record_blog_post(
         info = find_conversation(store, conversation_uuid)
         resolved = resolve_post_range(store, conversation_uuid, through_index, start, end)
         duplicate_note = render.render_duplicate_note(store.find_posted_overlap(resolved.message_uuids))
+        # 記録に失敗しても手がかりが残るように、DB に書く前にログへ残す（post_blog_article と同じ理由）
+        logger.info(
+            "record_blog_post service=%s url=%s conversation=%s index=%d-%d",
+            service,
+            url,
+            conversation_uuid,
+            resolved.start,
+            resolved.end,
+        )
         store.record_post(conversation_uuid, service, url, title, resolved.message_uuids)
     result = (
         f"「{render.conversation_title(info.name, info.first_human_text)}」 conversation={conversation_uuid} の "
@@ -544,6 +632,17 @@ async def post_blog_article(
     poster = make_poster(service)
     article = blog.BlogArticle(title=title, content=content, categories=categories or [])
     result = await poster.post(article, draft=not publish)
+    # 記録に失敗しても URL が残るように、DB に書く前にログへ残す
+    logger.info(
+        "post_blog_article service=%s url=%s edit_url=%s draft=%s conversation=%s index=%d-%d",
+        service,
+        result.url,
+        result.edit_url,
+        not publish,
+        conversation_uuid,
+        resolved.start,
+        resolved.end,
+    )
     try:
         with open_store() as store:
             store.record_post(conversation_uuid, service, result.url, title, resolved.message_uuids)
@@ -603,4 +702,5 @@ def draft_blog_with_claude(conversation_uuid: str, through_index: str | None = N
 
 
 def main() -> None:
+    log.setup_logging()
     mcp.run()  # 既定は stdio。stdout は通信に使われるので print してはいけない
