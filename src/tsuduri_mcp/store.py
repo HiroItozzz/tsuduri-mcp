@@ -105,6 +105,7 @@ class ConversationSummary:
     created_at: str
     updated_at: str
     message_count: int
+    text_message_count: int  # 本文のあるメッセージの数。エクスポートに本文が含まれない会話がある
     first_human_text: str  # タイトルが空の会話を見分けるため
 
 
@@ -295,10 +296,18 @@ class ConversationStore:
         limit: int = 50,
         offset: int = 0,
     ) -> Page[ConversationSummary]:
-        """期間に動きのあった会話（作成が until より前、かつ最終更新が since 以降）を返す。"""
+        """期間にやりとりのあった会話（since 以上 until 未満に作られたメッセージがある会話）を返す。
+
+        会話の updated_at は、タイトルの変更などメッセージのない操作でも新しくなるので、期間の判定には使わない。
+        """
         where = _Where()
-        where.add_if_given("c.updated_at >= ?", since)
-        where.add_if_given("c.created_at < ?", until)
+        if since is not None or until is not None:
+            where.add(
+                """EXISTS (SELECT 1 FROM messages m WHERE m.conversation_uuid = c.uuid
+                           AND m.created_at >= ? AND m.created_at < ?)""",
+                since or "",
+                until or "9999",
+            )
         where.add_if_given("c.uuid = ?", uuid)
         if title:
             where.add("c.name LIKE ? ESCAPE '\\'", _like_pattern(title))
@@ -307,6 +316,8 @@ class ConversationStore:
         rows = self.conn.execute(
             f"""SELECT c.uuid, c.name, c.created_at, c.updated_at,
                        (SELECT count(*) FROM messages m WHERE m.conversation_uuid = c.uuid) AS message_count,
+                       (SELECT count(*) FROM messages m WHERE m.conversation_uuid = c.uuid AND m.text != '')
+                           AS text_message_count,
                        coalesce((SELECT m.text FROM messages m
                                  WHERE m.conversation_uuid = c.uuid AND m.sender = 'human' AND m.text != ''
                                  ORDER BY m.position LIMIT 1), '') AS first_human_text

@@ -65,6 +65,11 @@ def render_conversation_list(page: Page[ConversationSummary], offset: int) -> st
         lines.append(
             f"- {c.uuid} | {conversation_title(c.name, c.first_human_text)} | "
             f"作成 {db_to_local(c.created_at)} / 更新 {db_to_local(c.updated_at)} | {c.message_count} 件"
+            + (
+                " | 本文なし（エクスポートに本文が含まれていない）"
+                if c.message_count and not c.text_message_count
+                else ""
+            )
         )
     return "\n".join(lines)
 

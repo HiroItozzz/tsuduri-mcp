@@ -105,3 +105,16 @@ def test_prompts_tell_client_how_to_read():
     assert "index" in summary  # 要約の形式（prompts/summary.md）が入っている
     assert "through_index=1" in blog
     assert "投稿はしないで" in blog
+
+
+def test_list_marks_conversation_without_text(tmp_path, monkeypatch):
+    hollow = raw_conversation("c-hollow", [raw_message("h0", text="", content=[])], name="")
+    src = tmp_path / "hollow.json"
+    src.write_text(json.dumps([hollow], ensure_ascii=False), encoding="utf-8")
+    path = tmp_path / "hollow.db"
+    conn = connect(path)
+    ConversationStore(conn).import_conversations(ClaudeExportSource(src).load())
+    conn.close()
+    monkeypatch.setenv("TSUDURI_DB", str(path))
+
+    assert "本文なし" in server.list_conversations()

@@ -104,16 +104,22 @@ def test_search_keyword_with_fts_syntax_is_literal(store):
 # --- list_conversations ---
 
 
-def test_list_by_period_includes_conversations_continued_in_it(store):
-    page = store.list_conversations(since=at(15), until=at(25))
-
-    assert [c.uuid for c in page.items] == ["c-blog"]  # 作成は 10 日だが 20 日に更新されている
+def test_list_by_period_uses_message_times(store):
+    # c-python は 1 日に作られ 2 日に続きを話した。c-blog は発言が 10 日で、会話の更新日だけが 20 日
+    assert [c.uuid for c in store.list_conversations(since=at(2), until=at(3)).items] == ["c-python"]
+    assert [c.uuid for c in store.list_conversations(since=at(5), until=at(15)).items] == ["c-blog"]
+    assert store.list_conversations(since=at(15), until=at(25)).total == 0
 
 
 def test_list_shows_first_human_text_and_counts(store):
-    blog = store.list_conversations(title=None, since=at(15)).items[0]
+    blog = store.list_conversations(uuid="c-blog").items[0]
 
-    assert (blog.name, blog.first_human_text, blog.message_count) == ("", "はてなブログに投稿したい", 2)
+    assert (blog.name, blog.first_human_text, blog.message_count, blog.text_message_count) == (
+        "",
+        "はてなブログに投稿したい",
+        2,
+        2,
+    )
 
 
 def test_list_by_title(store):
