@@ -8,7 +8,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 
 from tsuduri_mcp import blog, server
 from tsuduri_mcp.sources import ClaudeExportSource
-from tsuduri_mcp.store import ConversationStore, connect, default_db_path
+from tsuduri_mcp.store import ConversationStore, Summary, SummaryKey, connect, default_db_path
 
 from claude_export import raw_conversation, raw_message
 
@@ -131,3 +131,49 @@ def test_failed_post_is_not_recorded(fake_poster):
 def test_unsupported_service_is_rejected():
     with pytest.raises(ToolError, match="まだ対応していません"):
         post(service="qiita")
+
+
+def save_draft(first: str, last: str, title: str, content: str, categories: list[str]):
+    key = SummaryKey("c1", first, last, "blog_draft", "test-model", "hash")
+    body = json.dumps({"title": title, "content": content, "categories": categories}, ensure_ascii=False)
+    conn = connect(default_db_path())
+    try:
+        ConversationStore(conn).save_summary(Summary(key, body, 0, 0, "2026-09-27T00:00:00.000000Z"))
+    finally:
+        conn.close()
+
+
+def post_range_only(**kwargs):
+    kwargs.setdefault("conversation_uuid", "c1")
+    return asyncio.run(server.post_blog_article(**kwargs))
+
+
+def test_saved_draft_is_posted_when_title_and_content_are_omitted(fake_poster):
+    save_draft("m0", "m2", "保存したタイトル", "保存した本文", ["Python", "SQLite"])
+
+    post_range_only(start=0, end=2)
+
+    article, _ = fake_poster.calls[0]
+    assert article.title == "保存したタイトル"
+    assert article.content == "保存した本文"
+    assert article.categories == ["Python", "SQLite"]
+    assert list_posts()[0].title == "保存したタイトル"
+
+
+def test_given_fields_replace_only_those_of_the_saved_draft(fake_poster):
+    save_draft("m0", "m2", "保存したタイトル", "保存した本文", ["Python"])
+
+    post_range_only(start=0, end=2, title="直したタイトル")
+
+    article, _ = fake_poster.calls[0]
+    assert (article.title, article.content, article.categories) == ("直したタイトル", "保存した本文", ["Python"])
+
+
+def test_missing_saved_draft_is_an_error_and_nothing_is_posted(fake_poster):
+    save_draft("m0", "m0", "別の範囲の下書き", "本文", [])
+
+    with pytest.raises(ToolError, match="保存済みの下書きがありません"):
+        post_range_only(start=0, end=2)
+
+    assert fake_poster.calls == []
+    assert list_posts() == []

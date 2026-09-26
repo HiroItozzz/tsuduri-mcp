@@ -278,7 +278,8 @@ def render_blog_draft(
         draft.content,
         "",
         "（下書きです。まだ投稿していません）",
-        f"投稿は post_blog_article(start={start}, end={end}{through_arg}, title・content・categories) で。"
+        f"この下書きをそのまま投稿するなら post_blog_article(start={start}, end={end}{through_arg}) だけでよい"
+        "（保存済みの下書きが使われる。直すときは title・content・categories を渡す）。"
         "別の方法で投稿したときは、同じ範囲で record_blog_post を呼んで記録する",
     ]
     return "\n".join(lines)

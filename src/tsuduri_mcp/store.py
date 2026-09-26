@@ -667,6 +667,16 @@ class ConversationStore:
         ).fetchone()
         return None if row is None else Summary(key, **row)
 
+    def find_latest_draft(self, first_message_uuid: str, last_message_uuid: str) -> str | None:
+        """この範囲のブログの下書き（JSON）のうち、いちばん新しいもの。モデルやプロンプトは問わない。"""
+        row = self.conn.execute(
+            """SELECT content FROM summaries
+               WHERE first_message_uuid = ? AND last_message_uuid = ? AND kind = 'blog_draft'
+               ORDER BY created_at DESC LIMIT 1""",
+            (first_message_uuid, last_message_uuid),
+        ).fetchone()
+        return None if row is None else row["content"]
+
     def save_summary(self, summary: Summary) -> None:
         """同じキーがあれば上書きする（作り直したとき）。"""
         key = summary.key

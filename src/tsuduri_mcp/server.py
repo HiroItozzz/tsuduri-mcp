@@ -468,9 +468,13 @@ def record_blog_post(
 @mcp_tool
 async def post_blog_article(
     conversation_uuid: str,
-    title: str,
-    content: str,
-    categories: Annotated[list[str] | None, Field(description="カテゴリー（省くとなし）")] = None,
+    title: Annotated[str | None, Field(description="タイトル（省くと、この範囲の保存済みの下書きのもの）")] = None,
+    content: Annotated[
+        str | None, Field(description="本文（Markdown）。省くと、この範囲の保存済みの下書きのもの")
+    ] = None,
+    categories: Annotated[
+        list[str] | None, Field(description="カテゴリー（省くと、下書きを使うときはそのカテゴリー。ほかはなし）")
+    ] = None,
     service: Annotated[Literal["hatena"], Field(description="投稿先")] = "hatena",
     through_index: ThroughIndex = None,
     start: RangeStart = None,
@@ -479,13 +483,28 @@ async def post_blog_article(
 ) -> str:
     """ブログに投稿し、投稿した範囲を記録する。
 
-    draft_blog_post や draft_blog_with_claude が作った下書き（タイトル・本文・カテゴリー）を、
-    必要なら直してから渡す。既定は下書きとして投稿する（publish=true で公開）。
-    範囲は投稿する前に検証するので、範囲が誤っていれば投稿されない。
+    draft_blog_post の下書きは、同じ範囲（start・end）を渡すだけで、保存済みのものがそのまま投稿される。
+    直したいときや draft_blog_with_claude で書いたときは、title・content・categories を渡す
+    （渡した項目だけ差し替わる）。
+    既定は下書きとして投稿する（publish=true で公開）。範囲や下書きは投稿する前に確かめる。
     このツールを使わずに投稿したときの記録は record_blog_post で行う。
     """
     with open_store() as store:
         resolved = resolve_post_range(store, conversation_uuid, through_index, start, end)
+        saved = None
+        if title is None or content is None:
+            saved = store.find_latest_draft(resolved.message_uuids[0], resolved.message_uuids[-1])
+            if saved is None:
+                raise ValueError(
+                    f"index {resolved.start}〜{resolved.end} の保存済みの下書きがありません。"
+                    "draft_blog_post で同じ範囲の下書きを作るか、title と content を渡してください（投稿していません）"
+                )
+    if saved is not None:
+        draft = llm.BlogDraft.model_validate_json(saved)
+        title = draft.title if title is None else title
+        content = draft.content if content is None else content
+        categories = draft.categories if categories is None else categories
+    assert title is not None and content is not None
     poster = make_poster(service)
     article = blog.BlogArticle(title=title, content=content, categories=categories or [])
     result = await poster.post(article, draft=not publish)

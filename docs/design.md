@@ -133,7 +133,9 @@ MCP の prompt（クライアント自身に読ませて書かせるための指
 ## ブログへの投稿
 
 - `blog.py` に投稿先のインターフェース `BlogPoster`（`post(article, draft=…)`）を置き、サービスごとに実装する（`sources.py` と同じ考え方）。いまは `HatenaPoster` だけ。Qiita / Dev.to は実装クラスを足し、`server.default_poster` に1行足せば入る
-- `post_blog_article` は、タイトル・本文・カテゴリーを引数で受け取る。Gemini の下書き・Claude が書いた下書き・手で直した下書きのどれでも投稿できるようにするため（保存済みの下書きを読む形にすると、Gemini の下書きしか投稿できない）
+- `post_blog_article` は、title・content を省くと、その範囲（最初と最後のメッセージ）の保存済みの Gemini の下書き（いちばん新しいもの）をそのまま投稿する。渡した項目だけ差し替わるので、手で直した下書きや Claude が書いた下書きも投稿できる
+  - 最初は title・content を必ず引数で受け取っていた。実地確認で、AI が `draft_blog_post` の戻り値（タイトル行・カテゴリー行・案内の行と本文がひと続きの文章）から本文を自分で切り出していた。Gemini の出力は pydantic で分かれているのに、テキストにまとめて AI に切り直させると、案内の行などが本文に混ざっても気づけない。DB 経由で受け渡し、AI には範囲だけを持たせる
+  - 下書きがなければ、投稿せずにエラーにする。下書きのあとで会話が続いて範囲の終わりが変わったときも同じ（`draft_blog_post` の戻り値に書いた start・end を渡せば当たる）
 - 既定は下書き投稿（`publish=true` で公開）。はてなの下書きも記事として扱い、投稿した範囲は `posts` に記録する
 - 範囲（start・end）は `record_blog_post` と同じ規則で、**投稿する前に**検証する。投稿に失敗したら記録しない
 - HTTP は httpx2。Authlib は httpx2 があるとそちらを選ぶので、旧 httpx のクライアントと組み合わせると `Invalid "auth" argument` で壊れる（cha2hatena で起きた）
