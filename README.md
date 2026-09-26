@@ -29,7 +29,8 @@ claude mcp add tsuduri -- uv run --directory /path/to/tsuduri-mcp tsuduri-mcp
 | `export_conversation` | 会話の全文を Markdown ファイルに書き出す |
 | `summarize_conversation` | Gemini で要約する（要約は保存して使い回す） |
 | `draft_blog_post` | Gemini でブログの下書きを作る（投稿はしない） |
-| `record_blog_post` | 下書きを投稿したら、範囲を記録する（投稿自体はしない） |
+| `post_blog_article` | はてなブログへ投稿する（既定は下書き）。投稿した範囲を自動で記録する |
+| `record_blog_post` | `post_blog_article` を使わずに投稿したとき、範囲を記録する（投稿自体はしない） |
 
 prompt として `summarize_with_claude` と `draft_blog_with_claude` もある（クライアント自身が要約・下書きをする）。
 

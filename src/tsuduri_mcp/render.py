@@ -278,7 +278,8 @@ def render_blog_draft(
         draft.content,
         "",
         "（下書きです。まだ投稿していません）",
-        f"投稿したら record_blog_post(start={start}, end={end}{through_arg}) で同じ範囲を記録してください",
+        f"投稿は post_blog_article(start={start}, end={end}{through_arg}, title・content・categories) で。"
+        "別の方法で投稿したときは、同じ範囲で record_blog_post を呼んで記録する",
     ]
     return "\n".join(lines)
 

@@ -4,6 +4,7 @@ import inspect
 import tempfile
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import closing, contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -12,7 +13,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import Field
 from pydantic_ai.models import Model
 
-from . import llm, render
+from . import blog, llm, render
 from .dates import now_db, since_to_db, until_to_db
 from .store import (
     ConversationStore,
@@ -37,7 +38,8 @@ claude.ai の過去の会話履歴を検索・閲覧するサーバー。
 - 会話の中身を知りたいだけなら、summarize_conversation で Gemini に要約させるとコンテキストを節約できる
   （要約は保存され、2回目からは Gemini を呼ばない）
 - ブログの下書きは draft_blog_post（Gemini）か prompt の draft_blog_with_claude で作る。どちらも投稿はしない
-- 下書きを投稿したら record_blog_post で範囲を記録する。次の draft_blog_post は続きから作れる
+- はてなブログへ投稿するときは post_blog_article を使う（既定は下書き投稿）。投稿した範囲は自動で記録される
+- post_blog_article を使わずに投稿したときは、record_blog_post で範囲を記録する。次の draft_blog_post は続きから作れる
 """
 
 MAX_LIMIT = 100
@@ -48,6 +50,15 @@ MIN_MATERIAL_CHARS = 1000  # 下書きの材料（本文の合計）がこれ未
 SUMMARY_MODEL = llm.DEFAULT_GEMINI_MODEL
 DRAFT_MODEL = llm.DEFAULT_GEMINI_MODEL
 make_model: Callable[[str], Model] = llm.gemini  # テストでは通信しないモデルに差し替える
+
+
+def default_poster(service: str) -> blog.BlogPoster:
+    if service == "hatena":
+        return blog.HatenaPoster.from_env()
+    raise ValueError(f"{service} への投稿にはまだ対応していません")
+
+
+make_poster: Callable[[str], blog.BlogPoster] = default_poster  # テストでは通信しないポスターに差し替える
 
 mcp = MCPServer("tsuduri", instructions=INSTRUCTIONS)
 
@@ -385,6 +396,49 @@ async def draft_blog_post(
     return f"{header}\n\n{text}" if header else text
 
 
+@dataclass
+class ResolvedRange:
+    """record_blog_post と post_blog_article で共通の、記録・投稿する範囲。"""
+
+    line: Line
+    start: int
+    end: int
+    message_uuids: list[str]
+
+
+RangeStart = Annotated[int | None, Field(ge=0, description="範囲の始まり（省くと、まだ投稿していない部分の始まり）")]
+RangeEnd = Annotated[int | None, Field(ge=0, description="範囲の終わり。含む（省くと選んだ枝の最後の index）")]
+
+
+def resolve_post_range(
+    store: ConversationStore, conversation_uuid: str, through_index: int | None, start: int | None, end: int | None
+) -> ResolvedRange:
+    """record_blog_post・post_blog_article で範囲（start〜end）を決めて検証する。
+
+    投稿してから範囲エラーにならないよう、post_blog_article はこれを投稿の前に呼ぶ。
+    """
+    line = store.get_line(conversation_uuid, through_index)
+    if not line.messages:
+        raise ValueError("メッセージがありません")
+    positions = {pm.position for pm in line.messages}
+    first, last = line.messages[0].position, line.messages[-1].position
+    if start is None:
+        unposted = store.unposted_start(line.messages)
+        if unposted is None:
+            raise ValueError("この枝はすでに全部投稿済みです。start を指定してください")
+        start = unposted
+    if end is None:
+        end = last
+    if start not in positions:
+        raise ValueError(f"index={start} はこの枝にありません（{first}〜{last}）")
+    if end not in positions:
+        raise ValueError(f"index={end} はこの枝にありません（{first}〜{last}）")
+    if start > end:
+        raise ValueError(f"start（{start}）が end（{end}）より後ろです")
+    message_uuids = [pm.message.uuid for pm in line.messages if start <= pm.position <= end]
+    return ResolvedRange(line, start, end, message_uuids)
+
+
 @mcp_tool
 def record_blog_post(
     conversation_uuid: str,
@@ -392,12 +446,8 @@ def record_blog_post(
     url: str,
     title: str,
     through_index: ThroughIndex = None,
-    start: Annotated[
-        int | None, Field(ge=0, description="記録する範囲の始まり（省くと、まだ投稿していない部分の始まり）")
-    ] = None,
-    end: Annotated[
-        int | None, Field(ge=0, description="記録する範囲の終わり。含む（省くと選んだ枝の最後の index）")
-    ] = None,
+    start: RangeStart = None,
+    end: RangeEnd = None,
 ) -> str:
     """draft_blog_post で作った下書きを投稿したら、同じ範囲で呼んで記録する。投稿自体はしない。
 
@@ -406,29 +456,46 @@ def record_blog_post(
     """
     with open_store() as store:
         info = find_conversation(store, conversation_uuid)
-        line = store.get_line(conversation_uuid, through_index)
-        if not line.messages:
-            raise ValueError("メッセージがありません")
-        positions = {pm.position for pm in line.messages}
-        first, last = line.messages[0].position, line.messages[-1].position
-        if start is None:
-            unposted = store.unposted_start(line.messages)
-            if unposted is None:
-                raise ValueError("この枝はすでに全部投稿済みです。start を指定してください")
-            start = unposted
-        if end is None:
-            end = last
-        if start not in positions:
-            raise ValueError(f"index={start} はこの枝にありません（{first}〜{last}）")
-        if end not in positions:
-            raise ValueError(f"index={end} はこの枝にありません（{first}〜{last}）")
-        if start > end:
-            raise ValueError(f"start（{start}）が end（{end}）より後ろです")
-        message_uuids = [pm.message.uuid for pm in line.messages if start <= pm.position <= end]
-        store.record_post(conversation_uuid, service, url, title, message_uuids)
+        resolved = resolve_post_range(store, conversation_uuid, through_index, start, end)
+        store.record_post(conversation_uuid, service, url, title, resolved.message_uuids)
     return (
         f"「{render.conversation_title(info.name, info.first_human_text)}」 conversation={conversation_uuid} の "
-        f"index {start}〜{end}（この枝の {len(message_uuids)} 件）を {service} への投稿として記録しました: {url}"
+        f"index {resolved.start}〜{resolved.end}（この枝の {len(resolved.message_uuids)} 件）を "
+        f"{service} への投稿として記録しました: {url}"
+    )
+
+
+@mcp_tool
+async def post_blog_article(
+    conversation_uuid: str,
+    title: str,
+    content: str,
+    categories: Annotated[list[str] | None, Field(description="カテゴリー（省くとなし）")] = None,
+    service: Annotated[Literal["hatena"], Field(description="投稿先")] = "hatena",
+    through_index: ThroughIndex = None,
+    start: RangeStart = None,
+    end: RangeEnd = None,
+    publish: Annotated[bool, Field(description="true なら公開。false（既定）なら下書きとして投稿")] = False,
+) -> str:
+    """ブログに投稿し、投稿した範囲を記録する。
+
+    draft_blog_post や draft_blog_with_claude が作った下書き（タイトル・本文・カテゴリー）を、
+    必要なら直してから渡す。既定は下書きとして投稿する（publish=true で公開）。
+    範囲は投稿する前に検証するので、範囲が誤っていれば投稿されない。
+    このツールを使わずに投稿したときの記録は record_blog_post で行う。
+    """
+    with open_store() as store:
+        resolved = resolve_post_range(store, conversation_uuid, through_index, start, end)
+    poster = make_poster(service)
+    article = blog.BlogArticle(title=title, content=content, categories=categories or [])
+    result = await poster.post(article, draft=not publish)
+    with open_store() as store:
+        store.record_post(conversation_uuid, service, result.url, title, resolved.message_uuids)
+    status = "下書き" if result.is_draft else "公開"
+    return (
+        f"{status}として投稿しました: {result.url}（編集: {result.edit_url}）。"
+        f"conversation={conversation_uuid} の index {resolved.start}〜{resolved.end}"
+        f"（この枝の {len(resolved.message_uuids)} 件）を記録しました"
     )
 
 

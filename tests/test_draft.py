@@ -159,13 +159,13 @@ def test_draft_fully_posted_without_start_is_error(gemini):
 def test_draft_tells_how_to_record_the_post(gemini):
     result = draft()
 
-    assert "投稿したら record_blog_post(start=0, end=2) で同じ範囲を記録してください" in result
+    assert "post_blog_article(start=0, end=2, title・content・categories)" in result
 
 
 def test_draft_next_step_includes_through_index_when_given(gemini):
     result = draft(through_index=2)
 
-    assert "投稿したら record_blog_post(start=0, end=2, through_index=2) で同じ範囲を記録してください" in result
+    assert "post_blog_article(start=0, end=2, through_index=2, title・content・categories)" in result
 
 
 def test_draft_shows_the_branch_count_not_the_whole_range(gemini):
