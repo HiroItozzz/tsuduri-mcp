@@ -270,17 +270,57 @@ def prompt_hash(text: str) -> str:
 
 
 def load_transcript(
-    conversation_uuid: str, through_index: int | None, start: int
+    store: ConversationStore, conversation_uuid: str, line: Line, start: int
 ) -> tuple[ConversationSummary, list[PositionedMessage], str]:
-    with open_store() as store:
-        info = find_conversation(store, conversation_uuid)
-        messages = [pm for pm in store.get_line(conversation_uuid, through_index).messages if pm.position >= start]
+    """すでに開いた store と、すでに選んだ線（line）から、LLM に渡す会話ログを作る。
+
+    line.messages のうち position >= start のものだけを使う。
+    """
+    info = find_conversation(store, conversation_uuid)
+    messages = [pm for pm in line.messages if pm.position >= start]
     if not messages:
         raise ValueError(f"index={start} 以降のメッセージがありません")
     transcript = render.render_transcript(info, messages)
     if len(transcript) > MAX_INPUT_CHARS:
         raise ValueError(f"会話が長すぎます（{len(transcript)} 文字）。start で範囲をしぼってください")
     return info, messages, transcript
+
+
+@dataclass
+class CachedGeneration[T]:
+    """generate_cached の戻り値。あとでログや料金の計算を足すときも、ここに足していく。"""
+
+    output: T
+    summary: Summary
+    cached: bool  # 保存済みのものを使ったら True
+
+
+async def generate_cached[T](
+    key: SummaryKey,
+    instructions: str,
+    transcript: str,
+    output_type: type[T],
+    model_name: str,
+    refresh: bool,
+    dump: Callable[[T], str],
+    load: Callable[[str], T],
+) -> CachedGeneration[T]:
+    """summarize_conversation と draft_blog_post に共通の、Gemini を呼んで保存する流れ。
+
+    dump・load は、出力と summaries.content（文字列）との変換。
+    Gemini を呼んでいる間（await）は DB を開いたままにしない。
+    """
+    if not refresh:
+        with open_store() as store:
+            cached = store.find_summary(key)
+        if cached is not None:
+            return CachedGeneration(load(cached.content), cached, True)
+
+    result = await llm.generate(make_model(model_name), instructions, transcript, output_type)
+    summary = Summary(key, dump(result.output), result.input_tokens, result.output_tokens, now_db())
+    with open_store() as store:
+        store.save_summary(summary)
+    return CachedGeneration(result.output, summary, False)
 
 
 @mcp_tool
@@ -296,7 +336,9 @@ async def summarize_conversation(
     詳しく読みたいところだけ get_messages で読みに行ける。
     同じ範囲の要約は保存してあり、2回目からは Gemini を呼ばずに返す。
     """
-    info, messages, transcript = load_transcript(conversation_uuid, through_index, start)
+    with open_store() as store:
+        line = store.get_line(conversation_uuid, through_index)
+        info, messages, transcript = load_transcript(store, conversation_uuid, line, start)
 
     instructions = llm.load_prompt("summary")
     key = SummaryKey(
@@ -307,17 +349,8 @@ async def summarize_conversation(
         model=SUMMARY_MODEL,
         prompt_hash=prompt_hash(f"{TRANSCRIPT_VERSION}\n{instructions}"),
     )
-    if not refresh:
-        with open_store() as store:
-            cached = store.find_summary(key)
-        if cached is not None:
-            return render.render_summary(info, messages, cached, cached=True)
-
-    result = await llm.generate(make_model(SUMMARY_MODEL), instructions, transcript, str)
-    summary = Summary(key, result.output, result.input_tokens, result.output_tokens, now_db())
-    with open_store() as store:
-        store.save_summary(summary)
-    return render.render_summary(info, messages, summary, cached=False)
+    generated = await generate_cached(key, instructions, transcript, str, SUMMARY_MODEL, refresh, dump=str, load=str)
+    return render.render_summary(info, messages, generated.summary, cached=generated.cached)
 
 
 def resolve_draft_start(store: ConversationStore, line: Line, start: int | None) -> tuple[int, str | None]:
@@ -367,7 +400,7 @@ async def draft_blog_post(
             raise ValueError("メッセージがありません")
         start, skip_note = resolve_draft_start(store, line, start)
         header = draft_header_notes(store, conversation_uuid, line, through_index, skip_note)
-    info, messages, transcript = load_transcript(conversation_uuid, through_index, start)
+        info, messages, transcript = load_transcript(store, conversation_uuid, line, start)
     material_chars = sum(len(pm.message.text) for pm in messages)
     header = "\n".join(n for n in (header, render.material_warning(material_chars, MIN_MATERIAL_CHARS)) if n)
 
@@ -380,19 +413,19 @@ async def draft_blog_post(
         model=DRAFT_MODEL,
         prompt_hash=prompt_hash(f"{TRANSCRIPT_VERSION}\n{instructions}"),
     )
-    if not refresh:
-        with open_store() as store:
-            cached = store.find_summary(key)
-        if cached is not None:
-            draft = llm.BlogDraft.model_validate_json(cached.content)
-            text = render.render_blog_draft(info, messages, cached, draft, cached=True, through_index=through_index)
-            return f"{header}\n\n{text}" if header else text
-
-    result = await llm.generate(make_model(DRAFT_MODEL), instructions, transcript, llm.BlogDraft)
-    summary = Summary(key, result.output.model_dump_json(), result.input_tokens, result.output_tokens, now_db())
-    with open_store() as store:
-        store.save_summary(summary)
-    text = render.render_blog_draft(info, messages, summary, result.output, cached=False, through_index=through_index)
+    generated = await generate_cached(
+        key,
+        instructions,
+        transcript,
+        llm.BlogDraft,
+        DRAFT_MODEL,
+        refresh,
+        dump=llm.BlogDraft.model_dump_json,
+        load=llm.BlogDraft.model_validate_json,
+    )
+    text = render.render_blog_draft(
+        info, messages, generated.summary, generated.output, cached=generated.cached, through_index=through_index
+    )
     return f"{header}\n\n{text}" if header else text
 
 
