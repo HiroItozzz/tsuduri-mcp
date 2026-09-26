@@ -8,7 +8,7 @@ from dataclasses import dataclass
 
 from .dates import db_to_local
 from .llm import BlogDraft
-from .store import ConversationSummary, MessageHit, Page, PositionedMessage, Summary
+from .store import ConversationSummary, MessageHit, MessageNote, Page, PositionedMessage, Summary
 
 UNTITLED = "（タイトルなし）"
 
@@ -92,6 +92,20 @@ class Scope:
         return text + "）"
 
 
+def _note_line(note: MessageNote) -> str:
+    date = db_to_local(note.noticed_at).split(" ")[0]
+    if note.kind == "content_missing":
+        return f"（最新のエクスポートでは本文が消えている。{date} に確認）"
+    if note.kind == "message_missing":
+        return f"（最新のエクスポートにはこのメッセージがない。{date} に確認）"
+    return f"（{note.kind}。{date} に確認）"
+
+
+def note_lines(pm: PositionedMessage) -> list[str]:
+    """印のあるメッセージなら、見出しの次に出す説明の行を返す。"""
+    return [_note_line(note) for note in pm.notes]
+
+
 def branch_note(pm: PositionedMessage, scope: Scope) -> str:
     # 1本の線では親はいつも直前なので、すべての枝を並べたときだけ表示する
     if not scope.all_branches:
@@ -121,6 +135,7 @@ def render_messages(info: ConversationSummary, scope: Scope, start: int, count: 
         lines.append(
             f"\n--- index={pm.position} {m.sender} {db_to_local(m.created_at)}" + (f" ↳ {note}" if note else "")
         )
+        lines += note_lines(pm)
         text = m.text if max_chars is None else excerpt(m.text, max_chars)
         lines.append(text or _describe_empty(pm))
     return "\n".join(lines)
@@ -141,8 +156,9 @@ def render_markdown(info: ConversationSummary, scope: Scope, include_details: bo
         lines += [
             "",
             f"## index={pm.position} {m.sender} {db_to_local(m.created_at)}" + (f"（{note}）" if note else ""),
-            "",
         ]
+        lines += note_lines(pm)
+        lines.append("")
         if include_details:
             lines += [_render_block(b) for b in m.raw_content]
         else:
@@ -157,7 +173,9 @@ def render_transcript(info: ConversationSummary, messages: Sequence[PositionedMe
     lines = [f"# {conversation_title(info.name, info.first_human_text)}"]
     for pm in messages:
         m = pm.message
-        lines += ["", f"### index={pm.position} {m.sender} {db_to_local(m.created_at)}", m.text or _describe_empty(pm)]
+        lines += ["", f"### index={pm.position} {m.sender} {db_to_local(m.created_at)}"]
+        lines += note_lines(pm)
+        lines.append(m.text or _describe_empty(pm))
         lines += [f"[添付: {a.get('file_name', '')}]" for a in m.attachments]
     return "\n".join(lines)
 

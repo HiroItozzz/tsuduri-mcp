@@ -1,8 +1,8 @@
 """render.py の純粋な関数のテスト（DB やファイルは使わない）"""
 
 from tsuduri_mcp.models import Message
-from tsuduri_mcp.render import Scope, branch_note, excerpt
-from tsuduri_mcp.store import PositionedMessage
+from tsuduri_mcp.render import Scope, branch_note, excerpt, note_lines
+from tsuduri_mcp.store import MessageNote, PositionedMessage
 
 # --- excerpt ---
 
@@ -60,3 +60,26 @@ def test_branch_note_is_silent_when_not_showing_all_branches():
     scope = Scope(messages=[pm], all_branches=False, leaf_count=1)
 
     assert branch_note(pm, scope) == ""
+
+
+# --- note_lines ---
+
+
+def test_note_lines_describes_content_missing():
+    pm = _pm(0, None)
+    pm.notes = [MessageNote("content_missing", "2026-03-01T12:00:00.000000Z")]
+
+    assert note_lines(pm) == ["（最新のエクスポートでは本文が消えている。2026-03-01 に確認）"]
+
+
+def test_note_lines_describes_message_missing():
+    pm = _pm(0, None)
+    pm.notes = [MessageNote("message_missing", "2026-03-01T12:00:00.000000Z")]
+
+    assert note_lines(pm) == ["（最新のエクスポートにはこのメッセージがない。2026-03-01 に確認）"]
+
+
+def test_note_lines_is_empty_without_notes():
+    pm = _pm(0, None)
+
+    assert note_lines(pm) == []

@@ -101,3 +101,69 @@ def test_older_export_still_adds_its_own_messages(store, tmp_path):
 
 def test_unknown_conversation_is_none(store):
     assert store.get_conversation("存在しないテストの会話") is None
+
+
+# --- 消えた本文・メッセージの印 ---
+
+
+def test_content_missing_note_is_added_when_content_disappears(store, tmp_path):
+    import_raw(store, tmp_path, [two_turns()])
+    dropped = two_turns()
+    dropped["chat_messages"][0]["content"] = []
+
+    result = import_raw(store, tmp_path, [dropped])
+
+    assert result.notes_added == 1
+    m1 = store.get_messages("c1")[0]
+    assert m1.message.text == "テストの質問"  # 本文は残っている
+    assert [n.kind for n in m1.notes] == ["content_missing"]
+
+
+def test_message_missing_note_is_added_when_message_disappears(store, tmp_path):
+    import_raw(store, tmp_path, [two_turns()])
+    dropped = two_turns()
+    dropped["chat_messages"] = dropped["chat_messages"][:1]  # m2 が消えたエクスポート
+
+    result = import_raw(store, tmp_path, [dropped])
+
+    assert result.notes_added == 1
+    messages = store.get_messages("c1")
+    m2 = next(pm for pm in messages if pm.message.uuid == "m2")
+    assert [n.kind for n in m2.notes] == ["message_missing"]
+
+
+def test_notes_are_not_duplicated_and_noticed_at_does_not_change(store, tmp_path):
+    import_raw(store, tmp_path, [two_turns()])
+    dropped = two_turns()
+    dropped["chat_messages"][0]["content"] = []
+    import_raw(store, tmp_path, [dropped])
+    first_noticed_at = store.get_messages("c1")[0].notes[0].noticed_at
+
+    result = import_raw(store, tmp_path, [dropped])
+
+    assert result.notes_added == 0
+    assert store.get_messages("c1")[0].notes[0].noticed_at == first_noticed_at
+
+
+def test_content_missing_note_is_removed_when_content_comes_back(store, tmp_path):
+    import_raw(store, tmp_path, [two_turns()])
+    dropped = two_turns()
+    dropped["chat_messages"][0]["content"] = []
+    import_raw(store, tmp_path, [dropped])
+
+    import_raw(store, tmp_path, [two_turns()])  # 本文つきで戻ってきた
+
+    assert store.get_messages("c1")[0].notes == []
+
+
+def test_message_missing_note_is_removed_when_message_comes_back(store, tmp_path):
+    import_raw(store, tmp_path, [two_turns()])
+    dropped = two_turns()
+    dropped["chat_messages"] = dropped["chat_messages"][:1]
+    import_raw(store, tmp_path, [dropped])
+
+    import_raw(store, tmp_path, [two_turns()])  # 存在して戻ってきた
+
+    messages = store.get_messages("c1")
+    m2 = next(pm for pm in messages if pm.message.uuid == "m2")
+    assert m2.notes == []

@@ -138,6 +138,27 @@ def test_prompts_tell_client_how_to_read():
     assert "投稿はしないで" in blog
 
 
+def test_get_messages_shows_note_when_content_is_missing(tmp_path):
+    dropped = raw_conversation(
+        "c1",
+        [
+            raw_message("m0", text="テストの質問です", content=[]),  # 本文が消えたエクスポート
+            raw_message("m1", sender="assistant", text=LONG, parent="m0"),
+            raw_message("m2", text="別の聞き方をしたテストの質問", parent="m0"),
+        ],
+        name="つづりちゃんのテスト会話",
+    )
+    src = tmp_path / "dropped.json"
+    src.write_text(json.dumps([dropped], ensure_ascii=False), encoding="utf-8")
+    conn = connect(tmp_path / "tsuduri.db")
+    ConversationStore(conn).import_conversations(ClaudeExportSource(src).load())
+    conn.close()
+
+    result = server.get_messages("c1", start=0, count=1)
+
+    assert "最新のエクスポートでは本文が消えている" in result
+
+
 def test_list_marks_conversation_without_text(tmp_path, monkeypatch):
     hollow = raw_conversation("c-hollow", [raw_message("h0", text="", content=[])], name="")
     src = tmp_path / "hollow.json"

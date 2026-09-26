@@ -20,5 +20,6 @@ def main() -> None:
 
     print(
         f"{db_path} に取り込みました: 新規 {result.added} 件 / 更新 {result.updated} 件 / "
-        f"変化なし {result.unchanged} 件 / 追加メッセージ {result.messages_added} 件"
+        f"変化なし {result.unchanged} 件 / 追加メッセージ {result.messages_added} 件 / "
+        f"消えた本文・メッセージの印 {result.notes_added} 件"
     )

@@ -209,7 +209,7 @@ def export_conversation(
     return f"{path} に書き出しました（{len(scope.messages)} 件、{len(text)} 文字、{text.count(chr(10))} 行）"
 
 
-TRANSCRIPT_VERSION = 1  # render_transcript（会話ログの形）を変えたら、この数字を上げてキャッシュを作り直させる
+TRANSCRIPT_VERSION = 2  # render_transcript（会話ログの形）を変えたら、この数字を上げてキャッシュを作り直させる
 
 
 def prompt_hash(text: str) -> str:

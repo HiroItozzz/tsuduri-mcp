@@ -2,10 +2,11 @@ import json
 import os
 import sqlite3
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
+from .dates import now_db
 from .models import Conversation, Message
 
 DEFAULT_DB_PATH = "data/tsuduri.db"  # 相対パスは cwd 基準。MCP は `uv run --directory` で起動する前提
@@ -62,6 +63,14 @@ CREATE TABLE IF NOT EXISTS summaries (
 CREATE TRIGGER IF NOT EXISTS messages_fts_insert AFTER INSERT ON messages BEGIN
     INSERT INTO messages_fts(rowid, text) VALUES (new.id, new.text);
 END;
+
+-- 新しいエクスポートで本文やメッセージが消えていたことの印。DB には古いデータが残るので、印で気づけるようにする
+CREATE TABLE IF NOT EXISTS message_notes (
+    message_uuid TEXT NOT NULL REFERENCES messages(uuid),
+    kind         TEXT NOT NULL,  -- 'content_missing' / 'message_missing'
+    noticed_at   TEXT NOT NULL,  -- 最初に気づいた日時（UTC、DB と同じ形）
+    PRIMARY KEY (message_uuid, kind)
+);
 """
 
 FTS_MIN_CHARS = 3
@@ -86,6 +95,7 @@ class ImportResult:
     updated: int = 0  # updated_at が新しくなっていた会話
     unchanged: int = 0
     messages_added: int = 0
+    notes_added: int = 0  # 新しく気づいた「本文・メッセージが消えている」の印
 
 
 @dataclass
@@ -111,10 +121,19 @@ class ConversationSummary:
 
 
 @dataclass
+class MessageNote:
+    """新しいエクスポートで本文やメッセージが消えていたことの印。"""
+
+    kind: str
+    noticed_at: str
+
+
+@dataclass
 class PositionedMessage:
     position: int
     parent_position: int | None
     message: Message
+    notes: list[MessageNote] = field(default_factory=list)
 
 
 @dataclass
@@ -209,6 +228,8 @@ class ConversationStore:
                     result.unchanged += 1
                 # 会話が unchanged でも、そのエクスポートにしかないメッセージがあるかもしれないので必ず入れる
                 result.messages_added += self._insert_messages(conv)
+                # 印の更新も、会話の追加・更新の有無にかかわらず、エクスポートに入っていた会話は必ず調べる
+                result.notes_added += self._update_notes(conv)
         return result
 
     def _upsert_conversation(self, conv: Conversation) -> None:
@@ -244,6 +265,39 @@ class ConversationStore:
         )
         # rowcount はトリガー（FTS への書き込み）の分を含まない。total_changes は含むので使わない
         return cursor.rowcount
+
+    def _update_notes(self, conv: Conversation) -> int:
+        """このエクスポートの会話について、本文・メッセージが消えていないかを調べ、印を付け外しする。
+
+        新しく足した印の数を返す。
+        """
+        export_uuids = {m.uuid for m in conv.messages}
+        db_texts: dict[str, str] = dict(
+            self.conn.execute("SELECT uuid, text FROM messages WHERE conversation_uuid = ?", (conv.uuid,)).fetchall()
+        )
+        noticed_at = now_db()
+        added = 0
+        for m in conv.messages:
+            if not m.raw_content and db_texts.get(m.uuid, ""):
+                added += self._add_note(m.uuid, "content_missing", noticed_at)
+            else:
+                self._remove_note(m.uuid, "content_missing")
+        for uuid in db_texts:
+            if uuid not in export_uuids:
+                added += self._add_note(uuid, "message_missing", noticed_at)
+        for uuid in export_uuids:
+            self._remove_note(uuid, "message_missing")
+        return added
+
+    def _add_note(self, message_uuid: str, kind: str, noticed_at: str) -> int:
+        cursor = self.conn.execute(
+            "INSERT OR IGNORE INTO message_notes (message_uuid, kind, noticed_at) VALUES (?, ?, ?)",
+            (message_uuid, kind, noticed_at),
+        )
+        return cursor.rowcount  # 0 ならすでに印があった（noticed_at はそのまま）
+
+    def _remove_note(self, message_uuid: str, kind: str) -> None:
+        self.conn.execute("DELETE FROM message_notes WHERE message_uuid = ? AND kind = ?", (message_uuid, kind))
 
     # --- 読み出し ---
 
@@ -344,6 +398,7 @@ class ConversationStore:
                LIMIT ?""",
             (conversation_uuid, start, -1 if count is None else count),  # LIMIT -1 は上限なし
         ).fetchall()
+        notes = self._notes_for([row["uuid"] for row in rows])
         return [
             PositionedMessage(
                 position=row["position"],
@@ -359,9 +414,24 @@ class ConversationStore:
                     attachments=json.loads(row["attachments"]),
                     files=json.loads(row["files"]),
                 ),
+                notes=notes.get(row["uuid"], []),
             )
             for row in rows
         ]
+
+    def _notes_for(self, message_uuids: Sequence[str]) -> dict[str, list[MessageNote]]:
+        """複数メッセージぶんの印を、まとめて1回のクエリで読む。"""
+        if not message_uuids:
+            return {}
+        placeholders = ",".join("?" * len(message_uuids))
+        rows = self.conn.execute(
+            f"SELECT message_uuid, kind, noticed_at FROM message_notes WHERE message_uuid IN ({placeholders})",
+            message_uuids,
+        ).fetchall()
+        notes: dict[str, list[MessageNote]] = {}
+        for row in rows:
+            notes.setdefault(row["message_uuid"], []).append(MessageNote(row["kind"], row["noticed_at"]))
+        return notes
 
     def get_line(self, conversation_uuid: str, through_index: int | None = None) -> Line:
         """through_index のメッセージを通る線を返す。
