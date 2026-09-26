@@ -49,6 +49,7 @@ Claude デスクトップ（`claude_desktop_config.json`）:
 | `draft_blog_post` | Gemini でブログの下書きを作る（投稿はしない） |
 | `post_blog_article` | はてなブログへ投稿する（既定は下書き）。投稿した範囲を自動で記録する |
 | `record_blog_post` | `post_blog_article` を使わずに投稿したとき、範囲を記録する（投稿自体はしない） |
+| `check_blog_posts` | 記録した投稿の、はてな側での今の状態を確かめる |
 
 prompt として `summarize_with_claude` と `draft_blog_with_claude` もある（クライアント自身が要約・下書きをする）。
 

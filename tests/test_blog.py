@@ -98,6 +98,7 @@ def test_parse_response():
     assert result.title == "記事タイトル"
     assert result.url == "https://blog.example.com/entry/2025/11/20/100000"
     assert result.edit_url == "https://blog.hatena.ne.jp/user/blog.example.com/edit?entry=2500000000"
+    assert result.member_uri == "https://blog.hatena.ne.jp/user/blog.example.com/atom/entry/2500000000"
     assert result.is_draft is True
 
 
@@ -185,6 +186,103 @@ def test_post_wraps_malformed_response_xml_with_a_hint_to_check_hatena():
             await make_poster(client=client).post(article(), draft=True)
 
     with pytest.raises(RuntimeError, match="下書き一覧を確かめてから再実行"):
+        asyncio.run(run())
+
+
+# --- 記事の読み出し（GET, MockTransport） ---
+
+FETCHED_XML = """<?xml version="1.0" encoding="utf-8"?>
+<entry xmlns="http://www.w3.org/2005/Atom" xmlns:app="http://www.w3.org/2007/app">
+  <link rel="edit" href="https://blog.hatena.ne.jp/user/blog.example.com/atom/entry/2500000000"/>
+  <link rel="alternate" type="text/html" href="https://blog.example.com/entry/2025/11/20/103000"/>
+  <title>記事タイトル</title>
+  <updated>2025-11-20T10:30:00+09:00</updated>
+  <published>2025-11-20T10:00:00+09:00</published>
+  <app:edited>2025-11-20T10:30:00+09:00</app:edited>
+  <content type="text/x-markdown"># 見出し
+本文</content>
+  <category term="Python" />
+  <category term="自動投稿" />
+  <app:control>
+    <app:draft>yes</app:draft>
+  </app:control>
+</entry>
+"""
+
+MEMBER_URI = "https://blog.hatena.ne.jp/user/blog.example.com/atom/entry/2500000000"
+
+
+def test_get_returns_fetched_article():
+    requests: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        requests.append(request)
+        return httpx2.Response(200, text=FETCHED_XML)
+
+    async def run():
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
+            return await make_poster(client=client).get(MEMBER_URI)
+
+    result = asyncio.run(run())
+
+    assert len(requests) == 1
+    assert requests[0].method == "GET"
+    assert str(requests[0].url) == MEMBER_URI
+    assert result is not None
+    assert result.title == "記事タイトル"
+    assert result.content == "# 見出し\n本文"
+    assert result.categories == ["Python", "自動投稿"]
+    assert result.is_draft is True
+    assert result.url == "https://blog.example.com/entry/2025/11/20/103000"
+    assert result.edit_url == "https://blog.hatena.ne.jp/user/blog.example.com/edit?entry=2500000000"
+    assert result.updated == "2025-11-20T10:30:00+09:00"
+    assert result.edited == "2025-11-20T10:30:00+09:00"
+
+
+def test_get_returns_none_when_not_found():
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(404, text="Not Found")
+
+    async def run():
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
+            return await make_poster(client=client).get(MEMBER_URI)
+
+    assert asyncio.run(run()) is None
+
+
+def test_get_raises_runtime_error_for_other_failures():
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(500, text="Internal Server Error")
+
+    async def run():
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
+            await make_poster(client=client).get(MEMBER_URI)
+
+    with pytest.raises(RuntimeError, match="500"):
+        asyncio.run(run())
+
+
+def test_get_wraps_transport_error():
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        raise httpx2.ConnectError("接続に失敗しました")
+
+    async def run():
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
+            await make_poster(client=client).get(MEMBER_URI)
+
+    with pytest.raises(RuntimeError, match="ConnectError"):
+        asyncio.run(run())
+
+
+def test_get_wraps_malformed_response_xml():
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, text="これは XML ではありません")
+
+    async def run():
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
+            await make_poster(client=client).get(MEMBER_URI)
+
+    with pytest.raises(RuntimeError, match="解釈できません"):
         asyncio.run(run())
 
 

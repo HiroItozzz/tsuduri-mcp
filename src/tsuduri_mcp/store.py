@@ -77,6 +77,7 @@ CREATE TABLE IF NOT EXISTS main_line_messages (
 );
 
 -- ブログ投稿の記録。post_blog_article が投稿してそのまま記録する。手で投稿したときは record_blog_post で記録する
+-- member_uri は版1の移行で足した列（PRAGMA user_version を参照）。SCHEMA 自体はここでは変えない
 CREATE TABLE IF NOT EXISTS posts (
     id                INTEGER PRIMARY KEY,
     conversation_uuid TEXT NOT NULL REFERENCES conversations(uuid),
@@ -127,6 +128,28 @@ def connect(path: Path | str) -> sqlite3.Connection:
         conn.execute("PRAGMA journal_mode = WAL")
         conn.execute("PRAGMA busy_timeout = 30000")
     return conn
+
+
+# --- DB の版 ---
+
+# (版番号, その版に上げる SQL)。version は 1 から始まる連番で、古い版から順に適用する
+MIGRATIONS: list[tuple[int, str]] = [
+    (1, "ALTER TABLE posts ADD COLUMN member_uri TEXT"),  # はてなの記事を指す不変の URI。既存の行は NULL のまま
+]
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """PRAGMA user_version を見て、今の版より新しい移行だけを順に実行する。SCHEMA を流したあとに呼ぶ。
+
+    新しい DB（版0）でも古い DB でも、同じ道筋で最新の版になる。1回の移行は1トランザクション。
+    """
+    current = conn.execute("PRAGMA user_version").fetchone()[0]
+    for version, sql in MIGRATIONS:
+        if version <= current:
+            continue
+        with conn:
+            conn.execute(sql)
+            conn.execute(f"PRAGMA user_version = {version}")
 
 
 @dataclass
@@ -216,12 +239,14 @@ class LlmCall:
 class PostRecord:
     """記録されたブログ投稿。draft_blog_post が「過去にここまで投稿した」と知らせるのに使う。"""
 
+    id: int
     service: str
     url: str
     title: str
     min_position: int  # 投稿に使ったメッセージのうち、いちばん古いものの position
     max_position: int  # いちばん新しいものの position
     message_uuids: frozenset[str]
+    member_uri: str | None  # はてなの記事を指す不変の URI。record_blog_post で入れた記録は None
 
 
 @dataclass
@@ -348,6 +373,7 @@ class ConversationStore:
     def __init__(self, conn: sqlite3.Connection):
         self.conn = conn
         self.conn.executescript(SCHEMA)
+        _migrate(self.conn)
 
     # --- 取り込み ---
 
@@ -626,13 +652,24 @@ class ConversationStore:
     # --- ブログ投稿の記録 ---
 
     def record_post(
-        self, conversation_uuid: str, service: str, url: str, title: str, message_uuids: Sequence[str]
+        self,
+        conversation_uuid: str,
+        service: str,
+        url: str,
+        title: str,
+        message_uuids: Sequence[str],
+        member_uri: str | None = None,
     ) -> int:
-        """投稿を記録する（posts と post_messages を1トランザクションで書く）。作った post の id を返す。"""
+        """投稿を記録する（posts と post_messages を1トランザクションで書く）。作った post の id を返す。
+
+        member_uri は、post_blog_article が投稿したときだけ渡す（応答の edit リンクの href）。
+        record_blog_post で記録したものは、はてな側の今の状態を確かめられないので None のまま。
+        """
         with self.conn:
             cursor = self.conn.execute(
-                "INSERT INTO posts (conversation_uuid, service, url, title, posted_at) VALUES (?, ?, ?, ?, ?)",
-                (conversation_uuid, service, url, title, now_db()),
+                """INSERT INTO posts (conversation_uuid, service, url, title, posted_at, member_uri)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (conversation_uuid, service, url, title, now_db(), member_uri),
             )
             post_id = cursor.lastrowid
             self.conn.executemany(
@@ -664,7 +701,7 @@ class ConversationStore:
     def list_posts(self, conversation_uuid: str) -> list[PostRecord]:
         """この会話に記録された投稿を、記録した順に返す。"""
         rows = self.conn.execute(
-            """SELECT p.service, p.url, p.title,
+            """SELECT p.id, p.service, p.url, p.title, p.member_uri,
                       min(m.position) AS min_position, max(m.position) AS max_position,
                       group_concat(pm.message_uuid) AS message_uuids
                FROM posts p
@@ -677,15 +714,22 @@ class ConversationStore:
         ).fetchall()
         return [
             PostRecord(
+                id=row["id"],
                 service=row["service"],
                 url=row["url"],
                 title=row["title"],
                 min_position=row["min_position"],
                 max_position=row["max_position"],
                 message_uuids=frozenset(row["message_uuids"].split(",")),
+                member_uri=row["member_uri"],
             )
             for row in rows
         ]
+
+    def update_post_url(self, post_id: int, url: str) -> None:
+        """記録した URL を、はてなで確かめた今の URL に更新する（下書きは編集のたびに URL が変わるため）。"""
+        with self.conn:
+            self.conn.execute("UPDATE posts SET url = ? WHERE id = ?", (url, post_id))
 
     def _posted_uuids(self, message_uuids: Sequence[str]) -> set[str]:
         """このメッセージ uuid のうち、すでに投稿の記録があるものを返す。"""

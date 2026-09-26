@@ -29,8 +29,12 @@ class FakePoster(blog.BlogPoster):
             title=article.title,
             url="https://blog.example.com/entry/1",
             edit_url="https://blog.hatena.ne.jp/user/blog.example.com/edit?entry=1",
+            member_uri="https://blog.hatena.ne.jp/user/blog.example.com/atom/entry/1",
             is_draft=draft,
         )
+
+    async def get(self, member_uri: str) -> blog.FetchedArticle | None:
+        raise NotImplementedError  # このテストファイルでは使わない
 
 
 @pytest.fixture(autouse=True)
@@ -91,6 +95,7 @@ def test_posts_and_records_the_range(fake_poster):
     posts = list_posts()
     assert len(posts) == 1
     assert posts[0].url == "https://blog.example.com/entry/1"
+    assert posts[0].member_uri == "https://blog.hatena.ne.jp/user/blog.example.com/atom/entry/1"
     # 本線は m0, m2 の2件
     assert posts[0].min_position == 0
     assert posts[0].max_position == 2

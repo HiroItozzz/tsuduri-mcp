@@ -44,6 +44,7 @@ claude.ai の過去の会話履歴を検索・閲覧するサーバー。
 - ブログの下書きは draft_blog_post（Gemini）か prompt の draft_blog_with_claude で作る。どちらも投稿はしない
 - はてなブログへ投稿するときは post_blog_article を使う（既定は下書き投稿）。投稿した範囲は自動で記録される
 - post_blog_article を使わずに投稿したときは、record_blog_post で範囲を記録する。次の draft_blog_post は続きから作れる
+- 記録した投稿が今どうなっているか（下書きのままか、削除されていないか）は check_blog_posts で確かめる
 """
 
 MAX_LIMIT = 100
@@ -645,7 +646,7 @@ async def post_blog_article(
     )
     try:
         with open_store() as store:
-            store.record_post(conversation_uuid, service, result.url, title, resolved.message_uuids)
+            store.record_post(conversation_uuid, service, result.url, title, resolved.message_uuids, result.member_uri)
     except Exception as e:  # 投稿は済んでいるので、どんな失敗でも URL を返す
         through_arg = f", through_index={through_index}" if through_index is not None else ""
         raise RuntimeError(
@@ -664,6 +665,44 @@ async def post_blog_article(
         f"（この枝の {len(resolved.message_uuids)} 件）を記録しました"
     )
     return f"{duplicate_note}\n\n{body}" if duplicate_note else body
+
+
+@mcp_tool
+async def check_blog_posts(
+    conversation_uuid: str,
+    include_content: Annotated[bool, Field(description="true なら本文も全文表示する")] = False,
+) -> str:
+    """記録した投稿の、はてな側での今の状態を読み出す。
+
+    下書きは編集するたびに URL が変わるので、記録と違えば記録の URL を今の URL に更新する。
+    はてな側で見つからない（削除されたらしい）ときも記録は消さず、そのことだけ表示する。
+    record_blog_post で記録したもの（member_uri がない）は確かめられない。
+    """
+    with open_store() as store:
+        info = find_conversation(store, conversation_uuid)
+        posts = store.list_posts(conversation_uuid)
+    if not posts:
+        return f"「{render.conversation_title(info.name, info.first_human_text)}」に投稿の記録はありません"
+
+    blocks = []
+    for p in posts:
+        if p.member_uri is None:
+            blocks.append(render.render_post_without_member_uri(p))
+            continue
+        poster = make_poster(p.service)
+        fetched = await poster.get(p.member_uri)
+        if fetched is None:
+            blocks.append(render.render_post_deleted(p))
+            continue
+        url_updated = fetched.url != p.url
+        if url_updated:
+            with open_store() as store:
+                store.update_post_url(p.id, fetched.url)
+        blocks.append(render.render_post_status(p, fetched, url_updated, include_content))
+
+    title = render.conversation_title(info.name, info.first_human_text)
+    header = f"「{title}」 conversation={conversation_uuid} の投稿 {len(posts)} 件"
+    return header + "\n\n" + "\n\n".join(blocks)
 
 
 # --- MCP クライアント（Claude など）が自分で読んで書くための prompt ---

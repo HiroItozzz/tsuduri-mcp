@@ -29,7 +29,22 @@ class PostResult:
     title: str
     url: str
     edit_url: str
+    member_uri: str  # 記事の目印になる、変わらない URI（応答の edit リンクの href そのもの）
     is_draft: bool
+
+
+@dataclass
+class FetchedArticle:
+    """はてなから読み出した、記事の今の状態。"""
+
+    title: str
+    content: str
+    categories: list[str]
+    is_draft: bool
+    url: str  # 今の URL。下書きのあいだは編集するたびに変わる
+    edit_url: str
+    updated: str
+    edited: str
 
 
 class BlogPoster(ABC):
@@ -37,6 +52,11 @@ class BlogPoster(ABC):
 
     @abstractmethod
     async def post(self, article: BlogArticle, *, draft: bool) -> PostResult: ...
+
+    @abstractmethod
+    async def get(self, member_uri: str) -> FetchedArticle | None:
+        """member_uri の記事の今の状態を読み出す。見つからなければ None。"""
+        ...
 
 
 def _safe_find(root: ET.Element, key: str, ns: dict[str, str], default: str = "") -> str:
@@ -153,11 +173,55 @@ class HatenaPoster(BlogPoster):
     def _parse_response(self, text: str) -> PostResult:
         """投稿結果を取得"""
         root = ET.fromstring(text)
-        edit_api_url = _safe_find_attr(root, "atom:link[@rel='edit']", "href", self.NS)
-        edit_url = edit_api_url.replace("atom/entry/", "edit?entry=")
+        member_uri = _safe_find_attr(root, "atom:link[@rel='edit']", "href", self.NS)
+        edit_url = member_uri.replace("atom/entry/", "edit?entry=")
         return PostResult(
             title=_safe_find(root, "atom:title", self.NS),
             url=_safe_find_attr(root, "atom:link[@rel='alternate']", "href", self.NS),
             edit_url=edit_url,
+            member_uri=member_uri,
             is_draft=_safe_find(root, "app:control/app:draft", self.NS) == "yes",
+        )
+
+    async def get(self, member_uri: str) -> FetchedArticle | None:
+        auth = OAuth1Auth(
+            client_id=self.consumer_key,
+            client_secret=self.consumer_secret,
+            token=self.access_token,
+            token_secret=self.access_token_secret,
+            force_include_body=True,
+        )
+        try:
+            if self._client is not None:
+                response = await self._client.get(member_uri, auth=auth)
+            else:
+                async with httpx2.AsyncClient(timeout=REQUEST_TIMEOUT_SECONDS) as client:
+                    response = await client.get(member_uri, auth=auth)
+        except httpx2.HTTPError as e:
+            raise RuntimeError(f"はてなブログとの通信に失敗しました（{type(e).__name__}）") from e
+        if response.status_code == 404:
+            return None
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"はてなブログの記事を読み出せませんでした（status={response.status_code}）: {response.text[:200]}"
+            )
+        try:
+            return self._parse_fetched(response.text)
+        except ET.ParseError as e:
+            raise RuntimeError(f"はてなブログの応答を解釈できませんでした（{type(e).__name__}）") from e
+
+    def _parse_fetched(self, text: str) -> FetchedArticle:
+        """記事の今の状態を取得"""
+        root = ET.fromstring(text)
+        member_uri = _safe_find_attr(root, "atom:link[@rel='edit']", "href", self.NS)
+        edit_url = member_uri.replace("atom/entry/", "edit?entry=")
+        return FetchedArticle(
+            title=_safe_find(root, "atom:title", self.NS),
+            content=_safe_find(root, "atom:content", self.NS),
+            categories=[c.get("term", "") for c in root.findall("atom:category", self.NS)],
+            is_draft=_safe_find(root, "app:control/app:draft", self.NS) == "yes",
+            url=_safe_find_attr(root, "atom:link[@rel='alternate']", "href", self.NS),
+            edit_url=edit_url,
+            updated=_safe_find(root, "atom:updated", self.NS),
+            edited=_safe_find(root, "app:edited", self.NS),
         )

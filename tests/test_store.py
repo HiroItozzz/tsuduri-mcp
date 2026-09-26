@@ -3,7 +3,7 @@ import json
 import pytest
 
 from tsuduri_mcp.sources import ClaudeExportSource
-from tsuduri_mcp.store import ConversationStore, connect
+from tsuduri_mcp.store import MIGRATIONS, SCHEMA, ConversationStore, connect
 
 from claude_export import raw_conversation, raw_message
 
@@ -275,5 +275,58 @@ def test_connect_does_not_set_wal_for_in_memory_db():
     try:
         journal_mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
         assert journal_mode != "wal"  # :memory: は WAL にならない
+    finally:
+        conn.close()
+
+
+# --- DB の版（PRAGMA user_version） ---
+
+
+def test_new_db_is_migrated_to_the_latest_version(tmp_path):
+    conn = connect(tmp_path / "new.db")
+    try:
+        ConversationStore(conn)
+
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == len(MIGRATIONS)
+    finally:
+        conn.close()
+
+
+def test_migration_adds_member_uri_column_and_keeps_existing_rows(tmp_path):
+    path = tmp_path / "old.db"
+    conn = connect(path)
+    conn.executescript(SCHEMA)  # 版0の形（posts に member_uri 列がない）
+    conn.execute(
+        "INSERT INTO conversations (uuid, name, summary, created_at, updated_at) VALUES ('c1', '名前', '', 't', 't')"
+    )
+    conn.execute(
+        """INSERT INTO posts (conversation_uuid, service, url, title, posted_at)
+           VALUES ('c1', 'hatena', 'https://example.com/1', 'タイトル', 't')"""
+    )
+    conn.commit()
+    conn.close()
+
+    conn = connect(path)
+    try:
+        store = ConversationStore(conn)
+
+        row = store.conn.execute("SELECT url, member_uri FROM posts").fetchone()
+        assert row["url"] == "https://example.com/1"  # 既存の行は残っている
+        assert row["member_uri"] is None  # 新しい列は NULL
+        assert store.conn.execute("PRAGMA user_version").fetchone()[0] == len(MIGRATIONS)
+    finally:
+        conn.close()
+
+
+def test_reopening_a_migrated_db_does_not_fail(tmp_path):
+    path = tmp_path / "old.db"
+    conn = connect(path)
+    ConversationStore(conn)  # 1回目で最新の版になる
+    conn.close()
+
+    conn = connect(path)
+    try:
+        ConversationStore(conn)  # 2回目に開いても、移行をやり直さず壊れない
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == len(MIGRATIONS)
     finally:
         conn.close()
