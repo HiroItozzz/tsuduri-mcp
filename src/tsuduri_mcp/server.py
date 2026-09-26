@@ -231,5 +231,40 @@ async def summarize_conversation(
     return render.render_summary(info, messages, summary, cached=False)
 
 
+# --- MCP クライアント（Claude など）が自分で読んで書くための prompt ---
+
+READING_STEPS = """\
+会話 {conversation_uuid} を tsuduri の MCP ツールで読んでください。
+- ファイルを読めるなら export_conversation{through} でファイルに書き出し、必要なところを読む
+- 読めないなら get_messages{through} で start と count を進めながら、少しずつ読む
+- 枝分かれした会話は1本の枝（既定は本線）だけを扱う。原文の全文を返事に貼り付けない
+"""
+
+
+def reading_steps(conversation_uuid: str, through_index: str | None) -> str:
+    through = f"（through_index={through_index}）" if through_index else ""
+    return READING_STEPS.format(conversation_uuid=conversation_uuid, through=through)
+
+
+@mcp.prompt(title="会話を Claude が要約する")
+def summarize_with_claude(conversation_uuid: str, through_index: str | None = None) -> str:
+    """Gemini を使わず、MCP クライアント自身が会話を読んで要約する。"""
+    return (
+        reading_steps(conversation_uuid, through_index)
+        + "\n読み終えたら、次の指示に従って要約してください。\n\n"
+        + (llm.load_prompt("summary"))
+    )
+
+
+@mcp.prompt(title="会話から Claude がブログの下書きを書く")
+def draft_blog_with_claude(conversation_uuid: str, through_index: str | None = None) -> str:
+    """Gemini を使わず、MCP クライアント自身が会話を読んでブログの下書きを書く。投稿はしない。"""
+    return (
+        reading_steps(conversation_uuid, through_index)
+        + "\n読み終えたら、次の指示に従って、タイトル・本文・カテゴリーを書いてください。投稿はしないでください。\n\n"
+        + llm.load_prompt("blog")
+    )
+
+
 def main() -> None:
     mcp.run()  # 既定は stdio。stdout は通信に使われるので print してはいけない

@@ -95,3 +95,13 @@ def test_missing_db_is_error(monkeypatch, tmp_path):
 
     with pytest.raises(FileNotFoundError):
         server.list_conversations()
+
+
+def test_prompts_tell_client_how_to_read():
+    summary = server.summarize_with_claude("c1")
+    blog = server.draft_blog_with_claude("c1", through_index="1")
+
+    assert "c1" in summary
+    assert "index" in summary  # 要約の形式（prompts/summary.md）が入っている
+    assert "through_index=1" in blog
+    assert "投稿はしないで" in blog
