@@ -48,8 +48,10 @@ claude.ai の公式エクスポート（設定 → データのエクスポー�
 
 ### DB の場所
 
-- 既定は `data/tsuduri.db`（cwd 基準の相対パス）。環境変数 `TSUDURI_DB` で変えられる
-- MCP サーバーは `uv run --directory <このリポジトリ>` で起動するので、cwd はいつもリポジトリのルートになる
+- 既定は、ユーザーのデータ置き場の `tsuduri.db`（Linux は `$XDG_DATA_HOME` か `~/.local/share` の下の `tsuduri-mcp/`、Windows は `%LOCALAPPDATA%\tsuduri-mcp\`）。環境変数 `TSUDURI_DB` で変えられる
+- 以前はリポジトリの `data/tsuduri.db`（cwd 基準の相対パス）だった。`uv run --directory` 以外（uvx、Claude デスクトップが別の作業フォルダで起動する場合など）でも DB が見つかるように、作業フォルダに左右されない場所に変えた（2026-09-27）。移すときは SQLite のバックアップ機能でコピーし、表ごとの件数・整合性チェック・全文検索を比べて確かめた
+- 手元のリポジトリの `data` と `logs` は、新しい置き場所へのシンボリックリンクにしている（git 管理外）
+- 起動は、開発中なので `uv run --directory <リポジトリ> --env-file <.env> tsuduri-mcp`（コードを直せばすぐ反映される）。uvx はインストールした時点のコピーを動かすので、配布するときに考える
 - `*.db` などの SQLite ファイルは git 管理外
 
 ### 構成
@@ -61,6 +63,10 @@ claude.ai の公式エクスポート（設定 → データのエクスポー�
 - `render.py`: ツールの戻り値のテキストを組み立てる
 - `server.py`: MCP ツールの定義
 - `importer.py`: `tsuduri-import` コマンド
+- `llm.py`: pydantic-ai 経由で Gemini を呼ぶ。`prompts/` の指示文（要約・ブログ）を読む
+- `blog.py`: ブログへの投稿（`BlogPoster` と `HatenaPoster`）
+- `log.py`: ファイルへのログ
+- `paths.py`: DB とログの既定の置き場所
 
 SQLAlchemy は使わない。中心の FTS5（仮想テーブル、`MATCH`、トリガー）は SQLAlchemy でも生の SQL になり、表が2つで書き込みも取り込みの1か所だけなので、ORM の利点が小さいため。動的な WHERE は小さな `_Where` で組み立てている。
 
@@ -161,7 +167,7 @@ MCP の prompt（クライアント自身に読ませて書かせるための指
 
 ## ログ
 
-- `logs/tsuduri.log` に RotatingFileHandler（1MB × 5 世代）で書く。環境変数 `TSUDURI_LOG` で変えられる。`logs/` は git 管理外
+- DB と同じ置き場所の `logs/tsuduri.log` に RotatingFileHandler（1MB × 5 世代）で書く。環境変数 `TSUDURI_LOG` で変えられる
 - 設定するのは `server.main()` の中だけ。テストや `tsuduri-import` では import するだけなので、ファイルはできない
 - `tsuduri_mcp` ロガーだけを INFO にし、root には流さない（stdout を汚さないため）。セッションごとにプロセスが立つので、書式にプロセス番号を入れる
 - 記録するもの: ツールの呼び出し（名前・uuid や範囲などの一部の引数・かかった時間・成否。失敗はトレースバックごと）、Gemini の呼び出し（種類・モデル・範囲・トークン数・料金・保存済みを使ったか）、投稿（service・URL・編集 URL・下書きか・範囲。DB に記録する前に書く）
