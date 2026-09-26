@@ -16,6 +16,7 @@ claude.ai の過去の会話履歴を検索・閲覧するサーバー。
 - 話題から探すときは search_messages。当たったメッセージの conversation と index が返る
 - 期間で探すときは list_conversations（例: 先週の会話）
 - 前後の流れは get_messages で、index を指定して必要な範囲だけ読む
+- 枝分かれした会話は、既定でいちばん新しい枝（本線）だけを扱う。別の枝は through_index で選ぶ
 - 長い会話を丸ごと読むときは、AI がファイルを読める環境なら export_conversation でファイルに書き出してから読む
 - 日付はローカル時刻の YYYY-MM-DD（または ISO 8601 の日時）で指定する。表示もローカル時刻
 - index は会話の中でのメッセージの番号（0 始まり）
@@ -112,42 +113,66 @@ def list_conversations(
     return render.render_conversation_list(page, offset)
 
 
+# 線の選び方の引数は共通
+ThroughIndex = Annotated[
+    int | None,
+    Field(ge=0, description="この index のメッセージを通る枝を読む。省くといちばん新しいメッセージを通る枝（本線）"),
+]
+AllBranches = Annotated[bool, Field(description="true なら枝を選ばず、すべての枝を index 順に並べる")]
+
+
+def load_scope(
+    store: ConversationStore, conversation_uuid: str, through_index: int | None, all_branches: bool
+) -> render.Scope:
+    if all_branches:
+        messages = store.get_messages(conversation_uuid)
+        leaf_count = store.get_line(conversation_uuid).leaf_count
+        return render.Scope(messages, all_branches=True, leaf_count=leaf_count)
+    line = store.get_line(conversation_uuid, through_index)
+    return render.Scope(line.messages, all_branches=False, leaf_count=line.leaf_count)
+
+
 @mcp.tool(structured_output=False)
 def get_messages(
     conversation_uuid: str,
-    start: Annotated[int, Field(ge=0, description="最初の index")] = 0,
+    start: Annotated[int, Field(ge=0, description="この index 以降を読む")] = 0,
     count: Annotated[int, Field(ge=1, le=MAX_LIMIT)] = 10,
+    through_index: ThroughIndex = None,
+    all_branches: AllBranches = False,
     max_chars: Annotated[int | None, Field(ge=50, description="1件あたりの最大文字数。null なら省略しない")] = 2000,
 ) -> str:
     """会話のメッセージを index の順に、start から count 件だけ返す。
 
-    検索で当たったメッセージの前後を読むときは、start をその index の少し前にする。
-    編集や再生成で枝分かれした会話は、すべての枝が並んでいる。直前のメッセージ以外への返信には「分岐」と表示する。
+    編集や再生成で枝分かれした会話は、既定では1本の枝（本線）だけを返す。
+    検索で当たったメッセージの前後を読むときは、through_index にその index を、start にその少し前を渡す。
     """
     with open_store() as store:
         info = find_conversation(store, conversation_uuid)
-        messages = store.get_messages(conversation_uuid, start, count)
-    return render.render_messages(info, messages, start, max_chars)
+        scope = load_scope(store, conversation_uuid, through_index, all_branches)
+    return render.render_messages(info, scope, start, count, max_chars)
 
 
 @mcp.tool(structured_output=False)
 def export_conversation(
     conversation_uuid: str,
+    through_index: ThroughIndex = None,
+    all_branches: AllBranches = False,
     include_details: Annotated[bool, Field(description="thinking とツール呼び出しの名前も書き出す")] = False,
 ) -> str:
     """会話の全文を Markdown ファイルに書き出して、そのパスを返す。
 
     本文はコンテキストに入れずにファイルへ出すので、長い会話でも安い。
     ファイルを読めるクライアント（Claude Code など）で、必要なところだけ読んだり検索したりするときに使う。
+    既定では1本の枝（本線）だけを書き出す。
     """
     with open_store() as store:
         info = find_conversation(store, conversation_uuid)
-        messages = store.get_messages(conversation_uuid)
-    text = render.render_markdown(info, messages, include_details)
+        scope = load_scope(store, conversation_uuid, through_index, all_branches)
+    text = render.render_markdown(info, scope, include_details)
     EXPORT_DIR.mkdir(parents=True, exist_ok=True)
     path = EXPORT_DIR / f"{conversation_uuid}.md"
     path.write_text(text, encoding="utf-8")
-    return f"{path} に書き出しました（{info.message_count} 件、{len(text)} 文字、{text.count(chr(10))} 行）"
+    return f"{path} に書き出しました（{len(scope.messages)} 件、{len(text)} 文字、{text.count(chr(10))} 行）"
 
 
 def main() -> None:

@@ -4,6 +4,7 @@ AI のコンテキストを節約するため、JSON ではなく短いテキス
 """
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 from .dates import db_to_local
 from .store import ConversationSummary, MessageHit, Page, PositionedMessage
@@ -68,44 +69,70 @@ def render_conversation_list(page: Page[ConversationSummary], offset: int) -> st
     return "\n".join(lines)
 
 
-def render_messages(
-    info: ConversationSummary, messages: Sequence[PositionedMessage], start: int, max_chars: int | None
-) -> str:
-    shown = len(messages)
+@dataclass
+class Scope:
+    """get_messages / export で読む範囲。1本の線か、すべての枝か。"""
+
+    messages: list[PositionedMessage]
+    all_branches: bool
+    leaf_count: int
+
+    def describe(self, info: ConversationSummary) -> str:
+        if self.all_branches:
+            return f"すべての枝の {len(self.messages)} 件"
+        text = f"この線は {len(self.messages)} 件（会話全体 {info.message_count} 件"
+        if self.leaf_count > 1:
+            text += f"、枝 {self.leaf_count} 本。ほかの枝は through_index で選ぶ"
+        return text + "）"
+
+
+def branch_note(pm: PositionedMessage, scope: Scope) -> str:
+    # 1本の線では親はいつも直前なので、すべての枝を並べたときだけ表示する
+    if scope.all_branches and pm.parent_position is not None and pm.parent_position != pm.position - 1:
+        return f"index={pm.parent_position} への返信（分岐）"
+    return ""
+
+
+def render_messages(info: ConversationSummary, scope: Scope, start: int, count: int, max_chars: int | None) -> str:
+    candidates = [pm for pm in scope.messages if pm.position >= start]
+    shown, rest = candidates[:count], candidates[count:]
     lines = [f"「{conversation_title(info.name, info.first_human_text)}」 conversation={info.uuid}"]
-    if shown == 0:
-        lines.append(f"全 {info.message_count} 件。index={start} 以降のメッセージはありません。")
+    lines.append(scope.describe(info))
+    if not shown:
+        lines.append(f"index={start} 以降のメッセージはありません。")
     else:
-        head = f"全 {info.message_count} 件中 index {start}〜{start + shown - 1}"
-        if start + shown < info.message_count:
-            head += f"（続きは start={start + shown}）"
+        head = f"index {shown[0].position}〜{shown[-1].position} を表示"
+        if rest:
+            head += f"（続きは start={rest[0].position}）"
         lines.append(head)
-    for pm in messages:
+    for pm in shown:
         m = pm.message
-        branch = ""
-        if pm.parent_position is not None and pm.parent_position != pm.position - 1:
-            branch = f" ↳ index={pm.parent_position} への返信（分岐）"
-        lines.append(f"\n--- index={pm.position} {m.sender} {db_to_local(m.created_at)}{branch}")
+        note = branch_note(pm, scope)
+        lines.append(
+            f"\n--- index={pm.position} {m.sender} {db_to_local(m.created_at)}" + (f" ↳ {note}" if note else "")
+        )
         text = m.text if max_chars is None else excerpt(m.text, max_chars)
         lines.append(text or _describe_empty(pm))
     return "\n".join(lines)
 
 
-def render_markdown(info: ConversationSummary, messages: Sequence[PositionedMessage], include_details: bool) -> str:
+def render_markdown(info: ConversationSummary, scope: Scope, include_details: bool) -> str:
     """ファイルに書き出す用。本文は省略しない。"""
     lines = [
         f"# {conversation_title(info.name, info.first_human_text)}",
         "",
         f"- conversation: {info.uuid}",
         f"- 作成: {db_to_local(info.created_at)} / 更新: {db_to_local(info.updated_at)}",
-        f"- メッセージ: {info.message_count} 件",
+        f"- {scope.describe(info)}",
     ]
-    for pm in messages:
+    for pm in scope.messages:
         m = pm.message
-        branch = ""
-        if pm.parent_position is not None and pm.parent_position != pm.position - 1:
-            branch = f"（index={pm.parent_position} への返信・分岐）"
-        lines += ["", f"## index={pm.position} {m.sender} {db_to_local(m.created_at)}{branch}", ""]
+        note = branch_note(pm, scope)
+        lines += [
+            "",
+            f"## index={pm.position} {m.sender} {db_to_local(m.created_at)}" + (f"（{note}）" if note else ""),
+            "",
+        ]
         if include_details:
             lines += [_render_block(b) for b in m.raw_content]
         else:
