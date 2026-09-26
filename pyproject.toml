@@ -7,11 +7,18 @@ authors = [
     { name = "HiroItozzz", email = "mobiiii24@gmail.com" }
 ]
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+    "mcp>=2.2.0",
+]
 
 [project.scripts]
-tsuduri-mcp = "tsuduri_mcp:main"
+tsuduri-mcp = "tsuduri_mcp.server:main"
 
 [build-system]
 requires = ["uv_build>=0.12.17,<0.13.0"]
 build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
