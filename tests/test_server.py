@@ -1,5 +1,76 @@
-from tsuduri_mcp.server import hello
+"""MCP ツールのテスト。ツールは普通の関数としても呼べるので、戻り値のテキストを確かめる。"""
+
+import json
+from pathlib import Path
+
+import pytest
+
+from claude_export import raw_conversation, raw_message
+from tsuduri_mcp import server
+from tsuduri_mcp.sources import ClaudeExportSource
+from tsuduri_mcp.store import ConversationStore, connect
+
+LONG = "前置き" * 500 + "つづりちゃん" + "後書き" * 500
 
 
-def test_hello_includes_name():
-    assert "つづりちゃん" in hello("つづりちゃん")
+@pytest.fixture(autouse=True)
+def db(tmp_path, monkeypatch):
+    conversations = [
+        raw_conversation(
+            "c1",
+            [
+                raw_message("m0", text="テストの質問です"),
+                raw_message("m1", sender="assistant", text=LONG, parent="m0"),
+                raw_message("m2", text="別の聞き方をしたテストの質問", parent="m0"),
+            ],
+            name="つづりちゃんのテスト会話",
+        )
+    ]
+    src = tmp_path / "conversations.json"
+    src.write_text(json.dumps(conversations, ensure_ascii=False), encoding="utf-8")
+    path = tmp_path / "tsuduri.db"
+    conn = connect(path)
+    ConversationStore(conn).import_conversations(ClaudeExportSource(src).load())
+    conn.close()
+    monkeypatch.setenv("TSUDURI_DB", str(path))
+    monkeypatch.setattr(server, "EXPORT_DIR", tmp_path / "export")
+
+
+def test_search_returns_conversation_and_index_with_excerpt():
+    result = server.search_messages(["つづりちゃん"], max_chars=100)
+
+    assert "conversation=c1 index=1" in result
+    assert "つづりちゃん" in result  # 長い本文でもキーワードのまわりが残る
+    assert len(result) < 500
+
+
+def test_list_conversations():
+    assert "c1 | つづりちゃんのテスト会話" in server.list_conversations()
+
+
+def test_get_messages_shows_range_and_branch():
+    result = server.get_messages("c1", start=2, count=1)
+
+    assert "index=2" in result
+    assert "index=0 への返信（分岐）" in result
+    assert "index=1" not in result
+
+
+def test_export_writes_full_text_to_file():
+    result = server.export_conversation("c1")
+
+    path = Path(result.split(" に書き出しました")[0])
+    assert LONG in path.read_text(encoding="utf-8")
+    assert LONG not in result
+
+
+def test_unknown_conversation_is_error():
+    with pytest.raises(ValueError):
+        server.get_messages("存在しないテストの会話")
+
+
+def test_missing_db_is_error(monkeypatch, tmp_path):
+    monkeypatch.setenv("TSUDURI_DB", str(tmp_path / "ない.db"))
+
+    with pytest.raises(FileNotFoundError):
+        server.list_conversations()
