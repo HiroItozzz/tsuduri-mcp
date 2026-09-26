@@ -2,6 +2,7 @@ import asyncio
 import json
 
 import pytest
+from mcp.server.mcpserver.exceptions import ToolError
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
@@ -148,5 +149,107 @@ def test_draft_explicit_start_overrides_the_default(gemini):
 def test_draft_fully_posted_without_start_is_error(gemini):
     record_post(["m0", "m1", "m2"])
 
-    with pytest.raises(ValueError, match="投稿済み"):
+    with pytest.raises(ToolError, match="投稿済み"):
         draft()
+
+
+# --- 次の一手・件数の表示（この枝の N 件） ---
+
+
+def test_draft_tells_how_to_record_the_post(gemini):
+    result = draft()
+
+    assert "投稿したら record_blog_post(start=0, end=2) で同じ範囲を記録してください" in result
+
+
+def test_draft_next_step_includes_through_index_when_given(gemini):
+    result = draft(through_index=2)
+
+    assert "投稿したら record_blog_post(start=0, end=2, through_index=2) で同じ範囲を記録してください" in result
+
+
+def test_draft_shows_the_branch_count_not_the_whole_range(gemini):
+    result = draft()
+
+    assert "index 0〜2（この枝の 3 件）の下書き" in result
+
+
+# --- 材料が薄いときの警告 ---
+
+
+def test_draft_warns_when_material_is_thin(gemini):
+    result = draft()
+
+    assert "材料が少ない" in result
+
+
+def test_draft_no_warning_when_material_is_enough(gemini, monkeypatch):
+    monkeypatch.setattr(server, "MIN_MATERIAL_CHARS", 10)  # このフィクスチャの本文でも 10 文字は超える
+
+    result = draft()
+
+    assert "材料が少ない" not in result
+
+
+def test_blog_prompt_warns_against_padding():
+    from tsuduri_mcp import llm
+
+    assert "足さない" in llm.load_prompt("blog")
+
+
+# --- この会話への投稿の記録・枝分かれの知らせ ---
+
+
+def test_draft_lists_previous_posts_in_this_conversation(gemini):
+    record_post(["m0"], url="https://example.com/first", title="前の記事")
+
+    result = draft(start=0)
+
+    assert "この会話には投稿の記録があります:" in result
+    assert "「前の記事」 hatena index 0〜0（この枝） https://example.com/first" in result
+
+
+def test_draft_no_posts_note_without_any_post(gemini):
+    result = draft()
+
+    assert "投稿の記録があります" not in result
+
+
+@pytest.fixture
+def gemini_branchy(tmp_path, monkeypatch):
+    #  m0 ─ m1 ─ m2old            （古い枝）
+    #            └ m2new          （こちらが新しい）
+    msgs = [
+        raw_message("m0", text="最初のテストの質問", created_at="2026-01-01T00:00:00.000000Z"),
+        raw_message(
+            "m1", sender="assistant", text="最初のテストの答え", parent="m0", created_at="2026-01-01T00:01:00.000000Z"
+        ),
+        raw_message("m2old", text="古い枝の質問", parent="m1", created_at="2026-01-01T00:02:00.000000Z"),
+        raw_message("m2new", text="新しい枝の質問", parent="m1", created_at="2026-01-01T00:03:00.000000Z"),
+    ]
+    src = tmp_path / "conversations.json"
+    src.write_text(json.dumps([raw_conversation("c1", msgs)], ensure_ascii=False), encoding="utf-8")
+    path = tmp_path / "tsuduri.db"
+    conn = connect(path)
+    ConversationStore(conn).import_conversations(ClaudeExportSource(src).load())
+    conn.close()
+    monkeypatch.setenv("TSUDURI_DB", str(path))
+    fake = FakeGemini()
+    monkeypatch.setattr(server, "make_model", fake.model)
+    return fake
+
+
+def test_draft_mentions_the_branch_count_when_forked(gemini_branchy):
+    result = draft()
+
+    assert "この会話は枝が 2 本あります。いま読んでいる枝: 本線。別の枝は through_index で選べます" in result
+    # 本線は m0, m1, m2new の3件。position=2（m2old）は別の枝なので抜ける
+    assert "index 0〜3（この枝の 3 件）の下書き" in result
+
+
+def test_draft_marks_a_post_recorded_on_a_different_branch(gemini_branchy):
+    record_post(["m2old"])  # 古い枝（本線には入っていない）に投稿を記録
+
+    result = draft()
+
+    assert "index 2〜2（別の枝）" in result

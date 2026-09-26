@@ -2,6 +2,7 @@ import asyncio
 import json
 
 import pytest
+from mcp.server.mcpserver.exceptions import ToolError
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart, UserPromptPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
@@ -96,7 +97,7 @@ def test_start_limits_the_range_and_is_saved_separately(gemini):
 def test_too_long_conversation_is_error(gemini, monkeypatch):
     monkeypatch.setattr(server, "MAX_INPUT_CHARS", 10)
 
-    with pytest.raises(ValueError):
+    with pytest.raises(ToolError):
         summarize()
     assert gemini.prompts == []
 

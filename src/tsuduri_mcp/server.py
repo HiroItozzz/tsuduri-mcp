@@ -1,11 +1,14 @@
+import functools
 import hashlib
+import inspect
 import tempfile
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import closing, contextmanager
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import Field
 from pydantic_ai.models import Model
 
@@ -14,6 +17,7 @@ from .dates import now_db, since_to_db, until_to_db
 from .store import (
     ConversationStore,
     ConversationSummary,
+    Line,
     PositionedMessage,
     Summary,
     SummaryKey,
@@ -39,12 +43,43 @@ claude.ai の過去の会話履歴を検索・閲覧するサーバー。
 MAX_LIMIT = 100
 EXPORT_DIR = Path(tempfile.gettempdir()) / "tsuduri-mcp"
 MAX_INPUT_CHARS = 600_000  # いちばん長い会話の本線でも約 36 万文字（2026-09 時点）
+MIN_MATERIAL_CHARS = 1000  # 下書きの材料（本文の合計）がこれ未満なら「材料が薄い」と注意する
 
 SUMMARY_MODEL = llm.DEFAULT_GEMINI_MODEL
 DRAFT_MODEL = llm.DEFAULT_GEMINI_MODEL
 make_model: Callable[[str], Model] = llm.gemini  # テストでは通信しないモデルに差し替える
 
 mcp = MCPServer("tsuduri", instructions=INSTRUCTIONS)
+
+# MCPServer は ToolError 以外の例外の文言を消してクライアントに返すので、入口で ToolError に変える
+CAUGHT_EXCEPTIONS = (ValueError, FileNotFoundError, RuntimeError)
+
+
+def mcp_tool(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """`@mcp.tool(structured_output=False)` の代わりに使う、全ツール共通のデコレータ。
+
+    引数の名前・説明・既定値（入力スキーマ）は元の関数のまま変わらない
+    （functools.wraps で __wrapped__ を残し、シグネチャの取得はそちらに流れる）。
+    """
+    if inspect.iscoroutinefunction(fn):
+
+        @functools.wraps(fn)
+        async def wrapper(*args: Any, **kwargs: Any) -> Any:
+            try:
+                return await fn(*args, **kwargs)
+            except CAUGHT_EXCEPTIONS as e:
+                raise ToolError(str(e)) from e
+    else:
+
+        @functools.wraps(fn)
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            try:
+                return fn(*args, **kwargs)
+            except CAUGHT_EXCEPTIONS as e:
+                raise ToolError(str(e)) from e
+
+    return mcp.tool(structured_output=False)(wrapper)
+
 
 # 期間の引数の説明は共通
 Since = Annotated[str | None, Field(description="この日時以降（YYYY-MM-DD はその日の 0 時から）")]
@@ -75,7 +110,7 @@ def _check_keyword_lengths(words: Sequence[str]) -> None:
             raise ValueError(f"キーワードは2文字以上にしてください: {w!r}")
 
 
-@mcp.tool(structured_output=False)
+@mcp_tool
 def search_messages(
     keywords: Annotated[
         list[str], Field(description="探す言葉（2文字以上）。部分一致で、英字（半角）の大文字・小文字は区別しない")
@@ -121,7 +156,7 @@ def search_messages(
     return render.render_search(page, offset, max_chars, keywords)
 
 
-@mcp.tool(structured_output=False)
+@mcp_tool
 def list_conversations(
     since: Since = None,
     until: Until = None,
@@ -171,7 +206,7 @@ def load_scope(
     return render.Scope(line.messages, all_branches=False, leaf_count=line.leaf_count)
 
 
-@mcp.tool(structured_output=False)
+@mcp_tool
 def get_messages(
     conversation_uuid: str,
     start: Annotated[int, Field(ge=0, description="この index 以降を読む")] = 0,
@@ -191,7 +226,7 @@ def get_messages(
     return render.render_messages(info, scope, start, count, max_chars)
 
 
-@mcp.tool(structured_output=False)
+@mcp_tool
 def export_conversation(
     conversation_uuid: str,
     through_index: ThroughIndex = None,
@@ -237,7 +272,7 @@ def load_transcript(
     return info, messages, transcript
 
 
-@mcp.tool(structured_output=False)
+@mcp_tool
 async def summarize_conversation(
     conversation_uuid: str,
     through_index: ThroughIndex = None,
@@ -274,24 +309,33 @@ async def summarize_conversation(
     return render.render_summary(info, messages, summary, cached=False)
 
 
-def resolve_draft_start(conversation_uuid: str, through_index: int | None, start: int | None) -> tuple[int, str | None]:
+def resolve_draft_start(store: ConversationStore, line: Line, start: int | None) -> tuple[int, str | None]:
     """draft_blog_post の start。省いたら、線の上でまだ投稿していない部分の始まりにする。
 
     飛ばした範囲があれば注記も返す（なければ None）。
     """
     if start is not None:
         return start, None
-    with open_store() as store:
-        line = store.get_line(conversation_uuid, through_index)
-        if not line.messages:
-            raise ValueError("メッセージがありません")
-        unposted = store.unposted_start(line.messages)
-        if unposted is None:
-            raise ValueError("この枝はすでに全部投稿済みです（start=0 で全部を材料にできます）")
+    unposted = store.unposted_start(line.messages)
+    if unposted is None:
+        raise ValueError("この枝はすでに全部投稿済みです（start=0 で全部を材料にできます）")
     return unposted, render.skip_note(line.messages[0].position, unposted)
 
 
-@mcp.tool(structured_output=False)
+def draft_header_notes(
+    store: ConversationStore, conversation_uuid: str, line: Line, through_index: int | None, skip_note: str | None
+) -> str:
+    """draft_blog_post の戻り値の先頭に並べる注記（飛ばした範囲・過去の投稿・枝分かれ）をまとめる。"""
+    line_uuids = {pm.message.uuid for pm in line.messages}
+    notes = [
+        skip_note,
+        render.render_posts_note(store.list_posts(conversation_uuid), line_uuids),
+        render.render_branch_note(line.leaf_count, through_index),
+    ]
+    return "\n".join(n for n in notes if n)
+
+
+@mcp_tool
 async def draft_blog_post(
     conversation_uuid: str,
     through_index: ThroughIndex = None,
@@ -306,8 +350,15 @@ async def draft_blog_post(
     下書きは保存され、2回目からは Gemini を呼ばない。
     投稿したら、下書きに使った範囲（戻り値の index a〜b）で record_blog_post を呼んで記録する。
     """
-    start, note = resolve_draft_start(conversation_uuid, through_index, start)
+    with open_store() as store:
+        line = store.get_line(conversation_uuid, through_index)
+        if not line.messages:
+            raise ValueError("メッセージがありません")
+        start, skip_note = resolve_draft_start(store, line, start)
+        header = draft_header_notes(store, conversation_uuid, line, through_index, skip_note)
     info, messages, transcript = load_transcript(conversation_uuid, through_index, start)
+    material_chars = sum(len(pm.message.text) for pm in messages)
+    header = "\n".join(n for n in (header, render.material_warning(material_chars, MIN_MATERIAL_CHARS)) if n)
 
     instructions = llm.load_prompt("blog")
     key = SummaryKey(
@@ -323,18 +374,18 @@ async def draft_blog_post(
             cached = store.find_summary(key)
         if cached is not None:
             draft = llm.BlogDraft.model_validate_json(cached.content)
-            text = render.render_blog_draft(info, messages, cached, draft, cached=True)
-            return f"{note}\n\n{text}" if note else text
+            text = render.render_blog_draft(info, messages, cached, draft, cached=True, through_index=through_index)
+            return f"{header}\n\n{text}" if header else text
 
     result = await llm.generate(make_model(DRAFT_MODEL), instructions, transcript, llm.BlogDraft)
     summary = Summary(key, result.output.model_dump_json(), result.input_tokens, result.output_tokens, now_db())
     with open_store() as store:
         store.save_summary(summary)
-    text = render.render_blog_draft(info, messages, summary, result.output, cached=False)
-    return f"{note}\n\n{text}" if note else text
+    text = render.render_blog_draft(info, messages, summary, result.output, cached=False, through_index=through_index)
+    return f"{header}\n\n{text}" if header else text
 
 
-@mcp.tool(structured_output=False)
+@mcp_tool
 def record_blog_post(
     conversation_uuid: str,
     service: Service,
@@ -377,7 +428,7 @@ def record_blog_post(
         store.record_post(conversation_uuid, service, url, title, message_uuids)
     return (
         f"「{render.conversation_title(info.name, info.first_human_text)}」 conversation={conversation_uuid} の "
-        f"index {start}〜{end} を {service} への投稿として記録しました: {url}"
+        f"index {start}〜{end}（この枝の {len(message_uuids)} 件）を {service} への投稿として記録しました: {url}"
     )
 
 

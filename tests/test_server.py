@@ -1,9 +1,12 @@
 """MCP ツールのテスト。ツールは普通の関数としても呼べるので、戻り値のテキストを確かめる。"""
 
+import asyncio
 import json
 from pathlib import Path
 
 import pytest
+from mcp import Client
+from mcp.server.mcpserver.exceptions import ToolError
 
 from tsuduri_mcp import server
 from tsuduri_mcp.sources import ClaudeExportSource
@@ -54,12 +57,12 @@ def test_search_marks_hits_off_the_main_line():
 
 
 def test_search_rejects_one_char_keyword():
-    with pytest.raises(ValueError, match="2文字以上"):
+    with pytest.raises(ToolError, match="2文字以上"):
         server.search_messages(["あ"])
 
 
 def test_search_rejects_one_char_exclude():
-    with pytest.raises(ValueError, match="2文字以上"):
+    with pytest.raises(ToolError, match="2文字以上"):
         server.search_messages(["テスト"], exclude=["あ"])
 
 
@@ -117,22 +120,22 @@ def test_export_filenames_differ_by_branch_so_they_do_not_overwrite():
 
 
 def test_all_branches_and_through_index_together_is_error():
-    with pytest.raises(ValueError):
+    with pytest.raises(ToolError):
         server.get_messages("c1", through_index=1, all_branches=True)
 
-    with pytest.raises(ValueError):
+    with pytest.raises(ToolError):
         server.export_conversation("c1", through_index=1, all_branches=True)
 
 
 def test_unknown_conversation_is_error():
-    with pytest.raises(ValueError):
+    with pytest.raises(ToolError):
         server.get_messages("存在しないテストの会話")
 
 
 def test_missing_db_is_error(monkeypatch, tmp_path):
     monkeypatch.setenv("TSUDURI_DB", str(tmp_path / "ない.db"))
 
-    with pytest.raises(FileNotFoundError):
+    with pytest.raises(ToolError):
         server.list_conversations()
 
 
@@ -171,6 +174,8 @@ def test_record_blog_post_records_default_range():
     result = server.record_blog_post("c1", "hatena", "https://example.com/1", "タイトル")
 
     assert "index 0〜2" in result  # 既定は本線の全部（未投稿の始まり〜本線の最後）
+    # 本線は m0, m2 の2件（m1 は古い枝で、position=1 は本線に含まれない）
+    assert "（この枝の 2 件）" in result
     assert "hatena" in result
     assert "https://example.com/1" in result
 
@@ -206,20 +211,20 @@ def test_record_blog_post_through_index_uses_that_branch():
 
 
 def test_record_blog_post_start_after_end_is_error():
-    with pytest.raises(ValueError):
+    with pytest.raises(ToolError):
         server.record_blog_post("c1", "hatena", "https://example.com/1", "タイトル", start=2, end=0)
 
 
 def test_record_blog_post_index_not_on_the_line_is_error():
     # index=1 は本線にない（本線は m0, m2。m1 は古い枝）
-    with pytest.raises(ValueError):
+    with pytest.raises(ToolError):
         server.record_blog_post("c1", "hatena", "https://example.com/1", "タイトル", start=1)
 
 
 def test_record_blog_post_fully_posted_without_start_is_error():
     server.record_blog_post("c1", "hatena", "https://example.com/1", "タイトル")
 
-    with pytest.raises(ValueError, match="投稿済み"):
+    with pytest.raises(ToolError, match="投稿済み"):
         server.record_blog_post("c1", "hatena", "https://example.com/2", "続き")
 
 
@@ -234,3 +239,31 @@ def test_list_marks_conversation_without_text(tmp_path, monkeypatch):
     monkeypatch.setenv("TSUDURI_DB", str(path))
 
     assert "本文なし" in server.list_conversations()
+
+
+# --- クライアントと同じ経路（mcp.call_tool）で呼んだときのエラー文言 ---
+# MCPServer は ToolError 以外の例外だと文言を消してしまうので、こちらの文言が消えていないかを確かめる
+
+
+def call_tool(name, arguments):
+    async def run():
+        async with Client(server.mcp) as client:
+            return await client.call_tool(name, arguments)
+
+    return asyncio.run(run())
+
+
+def test_client_sees_the_keyword_length_message():
+    result = call_tool("search_messages", {"keywords": ["あ"]})
+
+    assert result.is_error
+    assert "2文字以上" in result.content[0].text
+
+
+def test_client_sees_the_missing_db_guidance(monkeypatch, tmp_path):
+    monkeypatch.setenv("TSUDURI_DB", str(tmp_path / "ない.db"))
+
+    result = call_tool("list_conversations", {})
+
+    assert result.is_error
+    assert "tsuduri-import" in result.content[0].text

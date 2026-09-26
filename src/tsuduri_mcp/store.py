@@ -184,6 +184,18 @@ class Summary:
 
 
 @dataclass
+class PostRecord:
+    """記録されたブログ投稿。draft_blog_post が「過去にここまで投稿した」と知らせるのに使う。"""
+
+    service: str
+    url: str
+    title: str
+    min_position: int  # 投稿に使ったメッセージのうち、いちばん古いものの position
+    max_position: int  # いちばん新しいものの position
+    message_uuids: frozenset[str]
+
+
+@dataclass
 class Line:
     """会話の中の1本の線（枝分かれを1つに決めたもの）。"""
 
@@ -591,6 +603,32 @@ class ConversationStore:
             )
         assert post_id is not None
         return post_id
+
+    def list_posts(self, conversation_uuid: str) -> list[PostRecord]:
+        """この会話に記録された投稿を、記録した順に返す。"""
+        rows = self.conn.execute(
+            """SELECT p.service, p.url, p.title,
+                      min(m.position) AS min_position, max(m.position) AS max_position,
+                      group_concat(pm.message_uuid) AS message_uuids
+               FROM posts p
+               JOIN post_messages pm ON pm.post_id = p.id
+               JOIN messages m ON m.uuid = pm.message_uuid
+               WHERE p.conversation_uuid = ?
+               GROUP BY p.id
+               ORDER BY p.id""",
+            (conversation_uuid,),
+        ).fetchall()
+        return [
+            PostRecord(
+                service=row["service"],
+                url=row["url"],
+                title=row["title"],
+                min_position=row["min_position"],
+                max_position=row["max_position"],
+                message_uuids=frozenset(row["message_uuids"].split(",")),
+            )
+            for row in rows
+        ]
 
     def _posted_uuids(self, message_uuids: Sequence[str]) -> set[str]:
         """このメッセージ uuid のうち、すでに投稿の記録があるものを返す。"""

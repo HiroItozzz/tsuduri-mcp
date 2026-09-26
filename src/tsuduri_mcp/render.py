@@ -8,7 +8,7 @@ from dataclasses import dataclass
 
 from .dates import db_to_local
 from .llm import BlogDraft
-from .store import ConversationSummary, MessageHit, MessageNote, Page, PositionedMessage, Summary
+from .store import ConversationSummary, MessageHit, MessageNote, Page, PositionedMessage, PostRecord, Summary
 
 UNTITLED = "（タイトルなし）"
 
@@ -187,12 +187,20 @@ def render_transcript(info: ConversationSummary, messages: Sequence[PositionedMe
 
 
 def render_summary_header(
-    info: ConversationSummary, messages: Sequence[PositionedMessage], summary: Summary, unit: str, cached: bool
+    info: ConversationSummary,
+    messages: Sequence[PositionedMessage],
+    summary: Summary,
+    unit: str,
+    cached: bool,
+    *,
+    count_label: str | None = None,
 ) -> list[str]:
+    """count_label を省くと「N 件」。会話全体の件数と混同しやすいところ（下書き）では明示する。"""
     key = summary.key
+    count = count_label if count_label is not None else f"{len(messages)} 件"
     lines = [
         f"「{conversation_title(info.name, info.first_human_text)}」 conversation={info.uuid}",
-        f"index {messages[0].position}〜{messages[-1].position}（{len(messages)} 件）の{unit}",
+        f"index {messages[0].position}〜{messages[-1].position}（{count}）の{unit}",
         f"{key.model} / 入力 {summary.input_tokens} トークン・出力 {summary.output_tokens} トークン"
         f" / 作成 {db_to_local(summary.created_at)}",
     ]
@@ -220,14 +228,48 @@ def skip_note(first_position: int, start: int) -> str | None:
     )
 
 
+def render_posts_note(posts: Sequence[PostRecord], line_uuids: set[str]) -> str | None:
+    """この会話にすでに記録されている投稿を、draft_blog_post の材料と混同しないように知らせる。
+
+    投稿に使ったメッセージが今読んでいる枝に全部あれば「この枝」、そうでなければ「別の枝」と添える。
+    """
+    if not posts:
+        return None
+    lines = ["この会話には投稿の記録があります:"]
+    for p in posts:
+        branch = "この枝" if p.message_uuids <= line_uuids else "別の枝"
+        lines.append(f"- 「{p.title}」 {p.service} index {p.min_position}〜{p.max_position}（{branch}） {p.url}")
+    return "\n".join(lines)
+
+
+def render_branch_note(leaf_count: int, through_index: int | None) -> str | None:
+    """会話が枝分かれしていれば、いま読んでいるのがどの枝かを知らせる。"""
+    if leaf_count <= 1:
+        return None
+    current = "本線" if through_index is None else f"through_index={through_index} の枝"
+    return f"この会話は枝が {leaf_count} 本あります。いま読んでいる枝: {current}。別の枝は through_index で選べます"
+
+
+def material_warning(material_chars: int, threshold: int) -> str | None:
+    """下書きの材料（メッセージ本文の合計）が薄いときの注意。"""
+    if material_chars >= threshold:
+        return None
+    return f"材料が少ない（{material_chars} 文字）。材料にない内容が混ざっていないか確かめてください"
+
+
 def render_blog_draft(
     info: ConversationSummary,
     messages: Sequence[PositionedMessage],
     summary: Summary,
     draft: BlogDraft,
     cached: bool,
+    through_index: int | None = None,
 ) -> str:
-    lines = render_summary_header(info, messages, summary, "下書き", cached)
+    unit = "下書き"
+    count_label = f"この枝の {len(messages)} 件"
+    lines = render_summary_header(info, messages, summary, unit, cached, count_label=count_label)
+    start, end = messages[0].position, messages[-1].position
+    through_arg = f", through_index={through_index}" if through_index is not None else ""
     lines += [
         "",
         f"# {draft.title}",
@@ -236,6 +278,7 @@ def render_blog_draft(
         draft.content,
         "",
         "（下書きです。まだ投稿していません）",
+        f"投稿したら record_blog_post(start={start}, end={end}{through_arg}) で同じ範囲を記録してください",
     ]
     return "\n".join(lines)
 
