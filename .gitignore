@@ -22,3 +22,6 @@ assets/
 
 # Claude Code の個人設定
 .claude/settings.local.json
+
+# 認証情報
+.env
