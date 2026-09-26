@@ -154,6 +154,23 @@ MCP の prompt（クライアント自身に読ませて書かせるための指
 - はてなの応答には URL が2つある。`alternate`（記事の URL。下書きのあいだは外から見えない）と `edit`（管理画面の編集 URL）。下書きのときは、記事の URL がまだ見えないことを戻り値に書く
 - テストでは `server.make_poster` を偽のポスターに差し替え、`HatenaPoster` は `httpx2.MockTransport` で確かめる。2026-09-27 に本物のはてなで下書き投稿を確認した（下書き一覧に入る・Markdown が崩れない・投稿者の表示も問題なし。`<author>` を送らなくてよい）
 
+### はてなで確かめた挙動（2026-09-27、下書きの記事で実験）
+
+- 記事の目印はメンバー URI（`…/atom/entry/{entry_id}`、応答の `link rel="edit"`）。**下書きのあいだは、編集するたびに記事の URL（alternate）が変わる**（末尾が最後に編集した時刻になる）。公開したあとの URL は変わらない（ユーザー談）
+- PUT は記事を丸ごと置き換える。カテゴリーを省くと消える。`updated` を省いても `updated`・`published` は変わらず、`app:edited` だけが新しくなる。`author` は省いても通る
+- 仕様書によると、PUT で `app:draft` を省くと「下書きでない」とみなされて公開される。PUT を作るときは必ず `app:draft` を送る
+
+### 記録した記事の確認
+
+- `posts.member_uri` にメンバー URI を持つ（`post_blog_article` で記録したものだけ。`record_blog_post` の記録は NULL）
+- `check_blog_posts` は、記録した記事をはてなから GET して、下書きか公開か・今の URL・カテゴリー・本文の文字数を出す。URL が記録と違えば記録を今の URL に直す。見つからなければ「削除されたようです」と出すが、記録は消さない
+- 下書きを公開に変える PUT は、まだ作っていない（公開は取り消しにくいので、はてなの画面で人が押す流れにしている）
+
+## DB の版
+
+- `PRAGMA user_version` で版を持ち、`MIGRATIONS`（版番号と SQL の並び）のうち今の版より新しいものだけを順に実行する。1回の移行は1トランザクション。SCHEMA は変えず、新しい DB も古い DB も同じ道筋で最新になる
+- 版1: `posts.member_uri` を足した
+
 ## 要約（LLM）
 
 - pydantic-ai を通して Gemini（`gemini-3-flash-preview`）を呼ぶ。LiteLLM は `openai<3`・httpx（旧）を要求し、mcp の httpx2 と食い違うので使わない
@@ -170,6 +187,7 @@ MCP の prompt（クライアント自身に読ませて書かせるための指
 - DB と同じ置き場所の `logs/tsuduri.log` に RotatingFileHandler（1MB × 5 世代）で書く。環境変数 `TSUDURI_LOG` で変えられる
 - 設定するのは `server.main()` の中だけ。テストや `tsuduri-import` では import するだけなので、ファイルはできない
 - `tsuduri_mcp` ロガーだけを INFO にし、root には流さない（stdout を汚さないため）。セッションごとにプロセスが立つので、書式にプロセス番号を入れる
+- 依存ライブラリのどれかが、import したときに root ロガーへ stderr 向けの INFO のハンドラを付ける（httpx2 の「HTTP Request」などが stderr に出る）。stdout には出ないことを確かめた
 - 記録するもの: ツールの呼び出し（名前・uuid や範囲などの一部の引数・かかった時間・成否。失敗はトレースバックごと）、Gemini の呼び出し（種類・モデル・範囲・トークン数・料金・保存済みを使ったか）、投稿（service・URL・編集 URL・下書きか・範囲。DB に記録する前に書く）
 - 記録しないもの: 会話や記事の本文、検索キーワード、環境変数。ただしエラーの文言はそのまま残すので、「キーワードは2文字以上に」のエラーでは、その1文字のキーワードが入る
 
@@ -186,7 +204,6 @@ ruff（リント・整形）と ty（型チェック）。`uv run ruff check . &
 ## 未決定
 
 - 投稿の一覧を出すツールや、記録の取り消し。使ってみて必要なら
-- 表の変更への備え: 既存の表に列を足す必要が出たら、`PRAGMA user_version` で DB の版を確かめる仕組みを入れる（いまは新しい表を足すだけなので不要）
 - 枝の一覧を出すツール（各枝の最後の発言の冒頭と日時）。使ってみて必要なら
 - P3 の残り: Qiita / Dev.to
 - DeepSeek / OpenAI（pydantic-ai ならモデル名を足すだけ）
