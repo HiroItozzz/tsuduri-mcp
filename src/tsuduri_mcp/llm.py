@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from importlib.resources import files
 
 import pydantic_ai
+from pydantic import BaseModel, Field
 from pydantic_ai import Agent
 from pydantic_ai.models import Model
 from pydantic_ai.models.google import GoogleModel
@@ -23,6 +24,12 @@ def gemini(model_name: str = DEFAULT_GEMINI_MODEL) -> Model:
     if not api_key:
         raise RuntimeError("GEMINI_API_KEY が見えません。MCP サーバーを起動する環境に設定してください")
     return GoogleModel(model_name, provider=GoogleProvider(api_key=api_key))
+
+
+class BlogDraft(BaseModel):
+    title: str = Field(description="記事のタイトル")
+    content: str = Field(description="記事の本文（Markdown）")
+    categories: list[str] = Field(max_length=4, description="記事のカテゴリー（4つまで）")
 
 
 def load_prompt(name: str) -> str:

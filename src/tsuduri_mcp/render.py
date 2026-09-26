@@ -7,6 +7,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from .dates import db_to_local
+from .llm import BlogDraft
 from .store import ConversationSummary, MessageHit, Page, PositionedMessage, Summary
 
 UNTITLED = "（タイトルなし）"
@@ -157,19 +158,46 @@ def render_transcript(info: ConversationSummary, messages: Sequence[PositionedMe
     return "\n".join(lines)
 
 
-def render_summary(
-    info: ConversationSummary, messages: Sequence[PositionedMessage], summary: Summary, cached: bool
-) -> str:
+def render_summary_header(
+    info: ConversationSummary, messages: Sequence[PositionedMessage], summary: Summary, unit: str, cached: bool
+) -> list[str]:
     key = summary.key
     lines = [
         f"「{conversation_title(info.name, info.first_human_text)}」 conversation={info.uuid}",
-        f"index {messages[0].position}〜{messages[-1].position}（{len(messages)} 件）の要約",
+        f"index {messages[0].position}〜{messages[-1].position}（{len(messages)} 件）の{unit}",
         f"{key.model} / 入力 {summary.input_tokens} トークン・出力 {summary.output_tokens} トークン"
         f" / 作成 {db_to_local(summary.created_at)}",
     ]
     if cached:
-        lines.append("保存済みの要約を返しました（作り直すときは refresh=true）")
+        lines.append(f"保存済みの{unit}を返しました（作り直すときは refresh=true）")
+    return lines
+
+
+def render_summary(
+    info: ConversationSummary, messages: Sequence[PositionedMessage], summary: Summary, cached: bool
+) -> str:
+    lines = render_summary_header(info, messages, summary, "要約", cached)
     return "\n".join(lines) + "\n\n" + summary.content
+
+
+def render_blog_draft(
+    info: ConversationSummary,
+    messages: Sequence[PositionedMessage],
+    summary: Summary,
+    draft: BlogDraft,
+    cached: bool,
+) -> str:
+    lines = render_summary_header(info, messages, summary, "下書き", cached)
+    lines += [
+        "",
+        f"# {draft.title}",
+        f"カテゴリー: {', '.join(draft.categories)}",
+        "",
+        draft.content,
+        "",
+        "（下書きです。まだ投稿していません）",
+    ]
+    return "\n".join(lines)
 
 
 def _render_block(block: dict) -> str:

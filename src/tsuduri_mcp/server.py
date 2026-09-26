@@ -11,7 +11,15 @@ from pydantic_ai.models import Model
 
 from . import llm, render
 from .dates import now_db, since_to_db, until_to_db
-from .store import ConversationStore, ConversationSummary, Summary, SummaryKey, connect, default_db_path
+from .store import (
+    ConversationStore,
+    ConversationSummary,
+    PositionedMessage,
+    Summary,
+    SummaryKey,
+    connect,
+    default_db_path,
+)
 
 INSTRUCTIONS = """\
 claude.ai の過去の会話履歴を検索・閲覧するサーバー。
@@ -24,6 +32,7 @@ claude.ai の過去の会話履歴を検索・閲覧するサーバー。
 - index は会話の中でのメッセージの番号（0 始まり）
 - 会話の中身を知りたいだけなら、summarize_conversation で Gemini に要約させるとコンテキストを節約できる
   （要約は保存され、2回目からは Gemini を呼ばない）
+- ブログの下書きは draft_blog_post（Gemini）か prompt の draft_blog_with_claude で作る。どちらも投稿はしない
 """
 
 MAX_LIMIT = 100
@@ -31,6 +40,7 @@ EXPORT_DIR = Path(tempfile.gettempdir()) / "tsuduri-mcp"
 MAX_INPUT_CHARS = 600_000  # いちばん長い会話の本線でも約 36 万文字（2026-09 時点）
 
 SUMMARY_MODEL = llm.DEFAULT_GEMINI_MODEL
+DRAFT_MODEL = llm.DEFAULT_GEMINI_MODEL
 make_model: Callable[[str], Model] = llm.gemini  # テストでは通信しないモデルに差し替える
 
 mcp = MCPServer("tsuduri", instructions=INSTRUCTIONS)
@@ -188,6 +198,20 @@ def prompt_hash(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()[:16]
 
 
+def load_transcript(
+    conversation_uuid: str, through_index: int | None, start: int
+) -> tuple[ConversationSummary, list[PositionedMessage], str]:
+    with open_store() as store:
+        info = find_conversation(store, conversation_uuid)
+        messages = [pm for pm in store.get_line(conversation_uuid, through_index).messages if pm.position >= start]
+    if not messages:
+        raise ValueError(f"index={start} 以降のメッセージがありません")
+    transcript = render.render_transcript(info, messages)
+    if len(transcript) > MAX_INPUT_CHARS:
+        raise ValueError(f"会話が長すぎます（{len(transcript)} 文字）。start で範囲をしぼってください")
+    return info, messages, transcript
+
+
 @mcp.tool(structured_output=False)
 async def summarize_conversation(
     conversation_uuid: str,
@@ -201,14 +225,7 @@ async def summarize_conversation(
     詳しく読みたいところだけ get_messages で読みに行ける。
     同じ範囲の要約は保存してあり、2回目からは Gemini を呼ばずに返す。
     """
-    with open_store() as store:
-        info = find_conversation(store, conversation_uuid)
-        messages = [pm for pm in store.get_line(conversation_uuid, through_index).messages if pm.position >= start]
-    if not messages:
-        raise ValueError(f"index={start} 以降のメッセージがありません")
-    transcript = render.render_transcript(info, messages)
-    if len(transcript) > MAX_INPUT_CHARS:
-        raise ValueError(f"会話が長すぎます（{len(transcript)} 文字）。start で範囲をしぼってください")
+    info, messages, transcript = load_transcript(conversation_uuid, through_index, start)
 
     instructions = llm.load_prompt("summary")
     key = SummaryKey(
@@ -230,6 +247,42 @@ async def summarize_conversation(
     with open_store() as store:
         store.save_summary(summary)
     return render.render_summary(info, messages, summary, cached=False)
+
+
+@mcp.tool(structured_output=False)
+async def draft_blog_post(
+    conversation_uuid: str,
+    through_index: ThroughIndex = None,
+    start: Annotated[int, Field(ge=0, description="この index 以降だけを下書きの材料にする")] = 0,
+    refresh: Annotated[bool, Field(description="保存済みの下書きがあっても作り直す")] = False,
+) -> str:
+    """Gemini でブログの下書き（タイトル・本文・カテゴリー）を作る。投稿はしない。
+
+    下書きは保存され、2回目からは Gemini を呼ばない。
+    """
+    info, messages, transcript = load_transcript(conversation_uuid, through_index, start)
+
+    instructions = llm.load_prompt("blog")
+    key = SummaryKey(
+        conversation_uuid=conversation_uuid,
+        first_message_uuid=messages[0].message.uuid,
+        last_message_uuid=messages[-1].message.uuid,
+        kind="blog_draft",
+        model=DRAFT_MODEL,
+        prompt_hash=prompt_hash(instructions),
+    )
+    if not refresh:
+        with open_store() as store:
+            cached = store.find_summary(key)
+        if cached is not None:
+            draft = llm.BlogDraft.model_validate_json(cached.content)
+            return render.render_blog_draft(info, messages, cached, draft, cached=True)
+
+    result = await llm.generate(make_model(DRAFT_MODEL), instructions, transcript, llm.BlogDraft)
+    summary = Summary(key, result.output.model_dump_json(), result.input_tokens, result.output_tokens, now_db())
+    with open_store() as store:
+        store.save_summary(summary)
+    return render.render_blog_draft(info, messages, summary, result.output, cached=False)
 
 
 # --- MCP クライアント（Claude など）が自分で読んで書くための prompt ---
