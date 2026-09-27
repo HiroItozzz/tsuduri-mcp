@@ -31,6 +31,8 @@ def test_invalid_date_is_error():
 
 @pytest.fixture
 def new_york(monkeypatch):
+    if not hasattr(time, "tzset"):
+        pytest.skip("システムのタイムゾーンを切り替える time.tzset が Windows にはない")
     """システムのタイムゾーンを一時的にニューヨーク（夏時間あり）にする。"""
     monkeypatch.setenv("TZ", "America/New_York")
     time.tzset()
