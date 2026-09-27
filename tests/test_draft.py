@@ -243,7 +243,7 @@ def test_draft_mentions_the_branch_count_when_forked(gemini_branchy):
     result = draft()
 
     assert "この会話は枝が 2 本あります。いま読んでいる枝: 本線。別の枝は through_index で選べます" in result
-    # 本線は m0, m1, m2new の3件。position=2（m2old）は別の枝なので抜ける
+    # 本線は m0, m1, m2new の3件。seq=2（m2old）は別の枝なので抜ける
     assert "index 0〜3（この枝の 3 件）の下書き" in result
 
 

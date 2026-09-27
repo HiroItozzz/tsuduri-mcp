@@ -2,7 +2,7 @@
 
 from tsuduri_mcp.models import Message
 from tsuduri_mcp.render import Scope, branch_note, excerpt, format_cost, note_lines, skip_note
-from tsuduri_mcp.store import MessageNote, PositionedMessage
+from tsuduri_mcp.store import MessageNote, StoredMessage
 
 # --- excerpt ---
 
@@ -32,12 +32,12 @@ def test_excerpt_keyword_near_the_end_has_no_trailing_ellipsis():
 # --- branch_note ---
 
 
-def _pm(position, parent_position):
+def _pm(seq, parent_seq):
     when = "2026-01-01T00:00:00.000000Z"
-    return PositionedMessage(
-        position=position,
-        parent_position=parent_position,
-        message=Message(uuid=f"u{position}", sender="human", text="t", created_at=when, updated_at=when),
+    return StoredMessage(
+        seq=seq,
+        parent_seq=parent_seq,
+        message=Message(uuid=f"u{seq}", sender="human", text="t", created_at=when, updated_at=when),
     )
 
 
@@ -89,11 +89,11 @@ def test_note_lines_is_empty_without_notes():
 
 
 def test_skip_note_is_none_when_nothing_was_skipped():
-    assert skip_note(first_position=0, start=0) is None
+    assert skip_note(first_seq=0, start=0) is None
 
 
 def test_skip_note_describes_the_skipped_range():
-    result = skip_note(first_position=0, start=3)
+    result = skip_note(first_seq=0, start=3)
 
     assert result == "index 0〜2 は投稿済みなので index 3 から下書きにした（全部使うなら start=0）"
 

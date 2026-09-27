@@ -53,7 +53,7 @@ def store(tmp_path):
 
 
 def found(page):
-    return [(h.conversation_uuid, h.position) for h in page.items]
+    return [(h.conversation_uuid, h.seq) for h in page.items]
 
 
 # --- search_messages ---
@@ -192,9 +192,7 @@ def test_list_orders_by_last_message_not_conversation_updated_at(tmp_path):
 def test_get_messages_range(store):
     messages = store.get_messages("c-python", start=1, count=1)
 
-    assert [(pm.position, pm.parent_position, pm.message.text) for pm in messages] == [
-        (1, 0, "リストは参照が共有されます")
-    ]
+    assert [(pm.seq, pm.parent_seq, pm.message.text) for pm in messages] == [(1, 0, "リストは参照が共有されます")]
 
 
 def test_short_keyword_with_like_wildcard_is_literal(store):
@@ -269,7 +267,7 @@ def test_search_marks_messages_off_the_main_line(branchy):
     # 「テストの続き」は古い枝の m2 と、本線の m2b（言い直したテストの続き）の両方に当たる
     page = branchy.search_messages(["テストの続き"])
 
-    assert [(h.position, h.on_main_line) for h in page.items] == [(4, True), (2, False)]
+    assert [(h.seq, h.on_main_line) for h in page.items] == [(4, True), (2, False)]
 
 
 def test_search_main_line_only_drops_other_branches(branchy):
@@ -300,7 +298,7 @@ def test_reimporting_extended_old_branch_swaps_main_line(branchy, tmp_path):
 
     assert uuids(branchy.get_line("c")) == ["m0", "m1", "m2", "m3", "m5"]
     page = branchy.search_messages(["テストの続き"])
-    assert [(h.position, h.on_main_line) for h in page.items] == [(4, False), (2, True)]  # 印が入れ替わっている
+    assert [(h.seq, h.on_main_line) for h in page.items] == [(4, False), (2, True)]  # 印が入れ替わっている
 
 
 # --- ブログ投稿の記録（枝ごとに扱う） ---
@@ -321,7 +319,7 @@ def test_search_marks_posted_messages(branchy):
 
     page = branchy.search_messages(["テストの答え"])
 
-    assert [(h.position, h.posted) for h in page.items] == [(1, True)]
+    assert [(h.seq, h.posted) for h in page.items] == [(1, True)]
 
 
 def test_list_conversations_shows_post_and_unposted_counts(branchy):

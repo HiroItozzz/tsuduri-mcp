@@ -97,8 +97,8 @@ def test_posts_and_records_the_range(fake_poster):
     assert posts[0].url == "https://blog.example.com/entry/1"
     assert posts[0].member_uri == "https://blog.hatena.ne.jp/user/blog.example.com/atom/entry/1"
     # 本線は m0, m2 の2件
-    assert posts[0].min_position == 0
-    assert posts[0].max_position == 2
+    assert posts[0].min_seq == 0
+    assert posts[0].max_seq == 2
 
     assert "下書きとして投稿しました" in result
     assert "公開するまで外からは見えない" in result

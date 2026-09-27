@@ -100,11 +100,11 @@ def test_older_export_still_adds_its_own_messages(store, tmp_path):
     assert [m.uuid for m in conv.messages] == ["m1", "m2", "m3"]
 
 
-def positions(store, conversation_uuid="c1"):
-    return [(pm.position, pm.message.uuid) for pm in store.get_messages(conversation_uuid)]
+def seqs(store, conversation_uuid="c1"):
+    return [(pm.seq, pm.message.uuid) for pm in store.get_messages(conversation_uuid)]
 
 
-def test_new_messages_get_positions_after_existing_ones_when_a_message_disappears(store, tmp_path):
+def test_new_messages_get_seqs_after_existing_ones_when_a_message_disappears(store, tmp_path):
     import_raw(store, tmp_path, [two_turns()])
     changed = two_turns()
     # m1 が消え、m3 が増えたエクスポート。配列の番号のままだと m3 が m2 と同じ 1 になる
@@ -116,10 +116,10 @@ def test_new_messages_get_positions_after_existing_ones_when_a_message_disappear
     result = import_raw(store, tmp_path, [changed])
 
     assert result.messages_added == 1
-    assert positions(store) == [(0, "m1"), (1, "m2"), (2, "m3")]
+    assert seqs(store) == [(0, "m1"), (1, "m2"), (2, "m3")]
 
 
-def test_older_export_messages_get_positions_after_existing_ones(store, tmp_path):
+def test_older_export_messages_get_seqs_after_existing_ones(store, tmp_path):
     newer = two_turns()
     newer["chat_messages"] = newer["chat_messages"][:1]  # 新しいほうでは m2 が消えている
     newer["chat_messages"].append(raw_message("m3", text="新しいエクスポートだけのメッセージ", parent="m1"))
@@ -127,7 +127,7 @@ def test_older_export_messages_get_positions_after_existing_ones(store, tmp_path
 
     import_raw(store, tmp_path, [two_turns()])
 
-    assert positions(store) == [(0, "m1"), (1, "m3"), (2, "m2")]  # m2 は時間では古いが、番号は後ろ
+    assert seqs(store) == [(0, "m1"), (1, "m3"), (2, "m2")]  # m2 は時間では古いが、番号は後ろ
 
 
 def test_same_uuid_twice_in_one_export_is_imported_once(store, tmp_path):
@@ -137,7 +137,7 @@ def test_same_uuid_twice_in_one_export_is_imported_once(store, tmp_path):
     result = import_raw(store, tmp_path, [conv])
 
     assert result.messages_added == 2
-    assert positions(store) == [(0, "m1"), (1, "m2")]
+    assert seqs(store) == [(0, "m1"), (1, "m2")]
 
 
 def test_unknown_conversation_is_none(store):
@@ -359,12 +359,12 @@ def test_migration_adds_member_uri_column_and_keeps_existing_rows(tmp_path):
         conn.close()
 
 
-def test_duplicate_position_in_a_conversation_is_rejected(store, tmp_path):
+def test_duplicate_seq_in_a_conversation_is_rejected(store, tmp_path):
     import_raw(store, tmp_path, [two_turns()])
 
     with pytest.raises(sqlite3.IntegrityError):
         store.conn.execute(
-            """INSERT INTO messages (uuid, conversation_uuid, position, parent_uuid, sender, text, created_at,
+            """INSERT INTO messages (uuid, conversation_uuid, seq, parent_uuid, sender, text, created_at,
                                      updated_at, raw_content, attachments, files)
                VALUES ('m9', 'c1', 1, NULL, 'human', '', 't', 't', '[]', '[]', '[]')"""
         )

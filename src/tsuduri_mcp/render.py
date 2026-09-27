@@ -14,9 +14,9 @@ from .store import (
     MessageHit,
     MessageNote,
     Page,
-    PositionedMessage,
     PostOverlap,
     PostRecord,
+    StoredMessage,
     Summary,
 )
 
@@ -63,11 +63,11 @@ def render_search(page: Page[MessageHit], offset: int, max_chars: int, keywords:
     lines = [page_header(page.total, offset, len(page.items), "メッセージ")]
     for hit in page.items:
         heading = (
-            f"\n--- conversation={hit.conversation_uuid} index={hit.position} {hit.sender} "
+            f"\n--- conversation={hit.conversation_uuid} index={hit.seq} {hit.sender} "
             f"{db_to_local(hit.created_at)} 「{conversation_title(hit.conversation_name)}」"
         )
         if not hit.on_main_line:
-            heading += f" ［本線外。through_index={hit.position} でこの枝を読める］"
+            heading += f" ［本線外。through_index={hit.seq} でこの枝を読める］"
         if hit.posted:
             heading += " ［投稿済み］"
         lines.append(heading)
@@ -95,7 +95,7 @@ def render_conversation_list(page: Page[ConversationInfo], offset: int) -> str:
 class Scope:
     """get_messages / export で読む範囲。1本の線か、すべての枝か。"""
 
-    messages: list[PositionedMessage]
+    messages: list[StoredMessage]
     all_branches: bool
     leaf_count: int
 
@@ -117,40 +117,38 @@ def _note_line(note: MessageNote) -> str:
     return f"（{note.kind}。{date} に確認）"
 
 
-def note_lines(pm: PositionedMessage) -> list[str]:
+def note_lines(pm: StoredMessage) -> list[str]:
     """印のあるメッセージなら、見出しの次に出す説明の行を返す。"""
     return [_note_line(note) for note in pm.notes]
 
 
-def branch_note(pm: PositionedMessage, scope: Scope) -> str:
+def branch_note(pm: StoredMessage, scope: Scope) -> str:
     # 1本の線では親はいつも直前なので、すべての枝を並べたときだけ表示する
     if not scope.all_branches:
         return ""
-    if pm.parent_position is None:
-        return "新しい根（最初の発言の編集）" if pm.position != 0 else ""
-    if pm.parent_position != pm.position - 1:
-        return f"index={pm.parent_position} への返信（分岐）"
+    if pm.parent_seq is None:
+        return "新しい根（最初の発言の編集）" if pm.seq != 0 else ""
+    if pm.parent_seq != pm.seq - 1:
+        return f"index={pm.parent_seq} への返信（分岐）"
     return ""
 
 
 def render_messages(info: ConversationInfo, scope: Scope, start: int, count: int, max_chars: int | None) -> str:
-    candidates = [pm for pm in scope.messages if pm.position >= start]
+    candidates = [pm for pm in scope.messages if pm.seq >= start]
     shown, rest = candidates[:count], candidates[count:]
     lines = [f"「{conversation_title(info.name, info.first_human_text)}」 conversation={info.uuid}"]
     lines.append(scope.describe(info))
     if not shown:
         lines.append(f"index={start} 以降のメッセージはありません。")
     else:
-        head = f"index {shown[0].position}〜{shown[-1].position} を表示"
+        head = f"index {shown[0].seq}〜{shown[-1].seq} を表示"
         if rest:
-            head += f"（続きは start={rest[0].position}）"
+            head += f"（続きは start={rest[0].seq}）"
         lines.append(head)
     for pm in shown:
         m = pm.message
         note = branch_note(pm, scope)
-        lines.append(
-            f"\n--- index={pm.position} {m.sender} {db_to_local(m.created_at)}" + (f" ↳ {note}" if note else "")
-        )
+        lines.append(f"\n--- index={pm.seq} {m.sender} {db_to_local(m.created_at)}" + (f" ↳ {note}" if note else ""))
         lines += note_lines(pm)
         text = m.text if max_chars is None else excerpt(m.text, max_chars)
         lines.append(text or _describe_empty(pm))
@@ -171,7 +169,7 @@ def render_markdown(info: ConversationInfo, scope: Scope, include_details: bool)
         note = branch_note(pm, scope)
         lines += [
             "",
-            f"## index={pm.position} {m.sender} {db_to_local(m.created_at)}" + (f"（{note}）" if note else ""),
+            f"## index={pm.seq} {m.sender} {db_to_local(m.created_at)}" + (f"（{note}）" if note else ""),
         ]
         lines += note_lines(pm)
         lines.append("")
@@ -184,12 +182,12 @@ def render_markdown(info: ConversationInfo, scope: Scope, include_details: bool)
     return "\n".join(lines) + "\n"
 
 
-def render_transcript(info: ConversationInfo, messages: Sequence[PositionedMessage]) -> str:
+def render_transcript(info: ConversationInfo, messages: Sequence[StoredMessage]) -> str:
     """LLM に渡す会話ログ。本文だけで、見出しに index を付ける。"""
     lines = [f"# {conversation_title(info.name, info.first_human_text)}"]
     for pm in messages:
         m = pm.message
-        lines += ["", f"### index={pm.position} {m.sender} {db_to_local(m.created_at)}"]
+        lines += ["", f"### index={pm.seq} {m.sender} {db_to_local(m.created_at)}"]
         lines += note_lines(pm)
         lines.append(m.text or _describe_empty(pm))
         lines += [f"[添付: {a.get('file_name', '')}]" for a in m.attachments]
@@ -210,7 +208,7 @@ def format_cost(cost_usd: float | None, cached: bool) -> str:
 
 def render_summary_header(
     info: ConversationInfo,
-    messages: Sequence[PositionedMessage],
+    messages: Sequence[StoredMessage],
     summary: Summary,
     unit: str,
     cached: bool,
@@ -226,7 +224,7 @@ def render_summary_header(
     count = count_label if count_label is not None else f"{len(messages)} 件"
     lines = [
         f"「{conversation_title(info.name, info.first_human_text)}」 conversation={info.uuid}",
-        f"index {messages[0].position}〜{messages[-1].position}（{count}）の{unit}",
+        f"index {messages[0].seq}〜{messages[-1].seq}（{count}）の{unit}",
         f"{key.model} / 入力 {summary.input_tokens} トークン・出力 {summary.output_tokens} トークン"
         f" / 作成 {db_to_local(summary.created_at)} / {format_cost(cost_usd, cached)}",
     ]
@@ -237,7 +235,7 @@ def render_summary_header(
 
 def render_summary(
     info: ConversationInfo,
-    messages: Sequence[PositionedMessage],
+    messages: Sequence[StoredMessage],
     summary: Summary,
     cached: bool,
     cost_usd: float | None = None,
@@ -246,16 +244,14 @@ def render_summary(
     return "\n".join(lines) + "\n\n" + summary.content
 
 
-def skip_note(first_position: int, start: int) -> str | None:
+def skip_note(first_seq: int, start: int) -> str | None:
     """draft_blog_post が start を省いた既定値（未投稿の始まり）に決めたとき、飛ばした範囲の注記。
 
     投稿済みの部分を飛ばしていなければ（start が線の最初の index のままなら）None。
     """
-    if start <= first_position:
+    if start <= first_seq:
         return None
-    return (
-        f"index {first_position}〜{start - 1} は投稿済みなので index {start} から下書きにした（全部使うなら start=0）"
-    )
+    return f"index {first_seq}〜{start - 1} は投稿済みなので index {start} から下書きにした（全部使うなら start=0）"
 
 
 def render_posts_note(posts: Sequence[PostRecord], line_uuids: set[str]) -> str | None:
@@ -268,7 +264,7 @@ def render_posts_note(posts: Sequence[PostRecord], line_uuids: set[str]) -> str 
     lines = ["この会話には投稿の記録があります:"]
     for p in posts:
         branch = "この枝" if p.message_uuids <= line_uuids else "別の枝"
-        lines.append(f"- 「{p.title}」 {p.service} index {p.min_position}〜{p.max_position}（{branch}） {p.url}")
+        lines.append(f"- 「{p.title}」 {p.service} index {p.min_seq}〜{p.max_seq}（{branch}） {p.url}")
     return "\n".join(lines)
 
 
@@ -287,15 +283,14 @@ def render_duplicate_note(overlaps: Sequence[PostOverlap]) -> str | None:
 def render_post_without_member_uri(p: PostRecord) -> str:
     """record_blog_post で入れた記録（member_uri がない）は、はてな側の今の状態を確かめられない。"""
     return (
-        f"- 「{p.title}」 {p.service} index {p.min_position}〜{p.max_position} {p.url}\n"
-        "  メンバー URI がないので確かめられない"
+        f"- 「{p.title}」 {p.service} index {p.min_seq}〜{p.max_seq} {p.url}\n  メンバー URI がないので確かめられない"
     )
 
 
 def render_post_deleted(p: PostRecord) -> str:
     """はてなに GET して見つからなかった（削除されたらしい）ときの表示。記録は消さない。"""
     return (
-        f"- 「{p.title}」 {p.service} index {p.min_position}〜{p.max_position} {p.url}\n"
+        f"- 「{p.title}」 {p.service} index {p.min_seq}〜{p.max_seq} {p.url}\n"
         "  はてな側で削除されたようです。記録は残したまま"
     )
 
@@ -303,7 +298,7 @@ def render_post_deleted(p: PostRecord) -> str:
 def render_post_status(p: PostRecord, fetched: FetchedArticle, url_updated: bool, include_content: bool) -> str:
     """はてなから読み出した記事の今の状態。"""
     lines = [
-        f"- 「{fetched.title}」 {p.service} index {p.min_position}〜{p.max_position}",
+        f"- 「{fetched.title}」 {p.service} index {p.min_seq}〜{p.max_seq}",
         f"  {'下書き' if fetched.is_draft else '公開'} / URL: {fetched.url}"
         + ("（記録と違ったので更新しました）" if url_updated else ""),
         f"  編集: {fetched.edit_url}",
@@ -332,7 +327,7 @@ def material_warning(material_chars: int, threshold: int) -> str | None:
 
 def render_blog_draft(
     info: ConversationInfo,
-    messages: Sequence[PositionedMessage],
+    messages: Sequence[StoredMessage],
     summary: Summary,
     draft: BlogDraft,
     cached: bool,
@@ -342,7 +337,7 @@ def render_blog_draft(
     unit = "下書き"
     count_label = f"この枝の {len(messages)} 件"
     lines = render_summary_header(info, messages, summary, unit, cached, cost_usd, count_label=count_label)
-    start, end = messages[0].position, messages[-1].position
+    start, end = messages[0].seq, messages[-1].seq
     through_arg = f", through_index={through_index}" if through_index is not None else ""
     lines += [
         "",
@@ -372,7 +367,7 @@ def _render_block(block: dict) -> str:
     return f"[{kind}]"
 
 
-def _describe_empty(pm: PositionedMessage) -> str:
+def _describe_empty(pm: StoredMessage) -> str:
     m = pm.message
     parts = [f"添付 {len(m.attachments)} 件"] if m.attachments else []
     tools = [b.get("name", "") for b in m.raw_content if b.get("type") == "tool_use"]

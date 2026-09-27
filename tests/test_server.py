@@ -174,7 +174,7 @@ def test_record_blog_post_records_default_range():
     result = server.record_blog_post("c1", "hatena", "https://example.com/1", "タイトル")
 
     assert "index 0〜2" in result  # 既定は本線の全部（未投稿の始まり〜本線の最後）
-    # 本線は m0, m2 の2件（m1 は古い枝で、position=1 は本線に含まれない）
+    # 本線は m0, m2 の2件（m1 は古い枝で、seq=1 は本線に含まれない）
     assert "（この枝の 2 件）" in result
     assert "hatena" in result
     assert "https://example.com/1" in result

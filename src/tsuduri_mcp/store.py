@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS messages (
     id                INTEGER PRIMARY KEY,  -- 全文検索の索引が参照する。VACUUM しても変わらない
     uuid              TEXT NOT NULL UNIQUE,
     conversation_uuid TEXT NOT NULL REFERENCES conversations(uuid),
-    position          INTEGER NOT NULL,     -- 会話の中の番号（0 始まり）。新しいメッセージに順に振り、変えない
+    position          INTEGER NOT NULL,     -- 版3で seq に改名。会話の中の番号（0 始まり）。一度振ったら変えない
     parent_uuid       TEXT,
     sender            TEXT NOT NULL,
     text              TEXT NOT NULL,
@@ -138,6 +138,8 @@ MIGRATIONS: list[tuple[int, str]] = [
     (1, "ALTER TABLE posts ADD COLUMN member_uri TEXT"),  # はてなの記事を指す不変の URI。既存の行は NULL のまま
     # 会話の中で index が重ならないことを DB でも保証する。重なりがあれば取り込みがエラーで止まる
     (2, "CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_position ON messages(conversation_uuid, position)"),
+    # position はエクスポートの中の位置ではなくなったので、名前を中身に合わせる。索引の定義の列名も SQLite が書き換える
+    (3, "ALTER TABLE messages RENAME COLUMN position TO seq"),
 ]
 
 
@@ -168,7 +170,7 @@ class ImportResult:
 class MessageHit:
     conversation_uuid: str
     conversation_name: str
-    position: int
+    seq: int
     sender: str
     created_at: str
     text: str
@@ -199,9 +201,9 @@ class MessageNote:
 
 
 @dataclass
-class PositionedMessage:
-    position: int
-    parent_position: int | None
+class StoredMessage:
+    seq: int
+    parent_seq: int | None
     message: Message
     notes: list[MessageNote] = field(default_factory=list)
 
@@ -246,8 +248,8 @@ class PostRecord:
     service: str
     url: str
     title: str
-    min_position: int  # 投稿に使ったメッセージのうち、いちばん古いものの position
-    max_position: int  # いちばん新しいものの position
+    min_seq: int  # 投稿に使ったメッセージのうち、いちばん古いものの seq
+    max_seq: int  # いちばん新しいものの seq
     message_uuids: frozenset[str]
     member_uri: str | None  # はてなの記事を指す不変の URI。record_blog_post で入れた記録は None
 
@@ -265,7 +267,7 @@ class PostOverlap:
 class Line:
     """会話の中の1本の線（枝分かれを1つに決めたもの）。"""
 
-    messages: list[PositionedMessage]
+    messages: list[StoredMessage]
     leaf_count: int  # 会話全体の枝の数。1 なら枝分かれなし
 
 
@@ -358,9 +360,9 @@ class ConversationStore:
     def _insert_messages(self, conv: Conversation) -> int:
         """DB にまだない uuid のメッセージだけを入れる。入れた数を返す。
 
-        position は、その会話の最大の position の次から、エクスポートの並び順に振る。
+        seq は、その会話の最大の seq の次から、エクスポートの並び順に振る。
         エクスポートの配列の番号をそのまま使うと、メッセージが消えたエクスポートで番号がずれて重なるため。
-        一度振った position は変えない（保存済みの要約に index が書いてあるため）。
+        一度振った seq は変えない（保存済みの要約に index が書いてあるため）。
         """
         existing = {
             row[0]
@@ -376,19 +378,19 @@ class ConversationStore:
                 new_messages.append(m)
         if not new_messages:
             return 0
-        next_position = self.conn.execute(
-            "SELECT coalesce(max(position) + 1, 0) FROM messages WHERE conversation_uuid = ?", (conv.uuid,)
+        next_seq = self.conn.execute(
+            "SELECT coalesce(max(seq) + 1, 0) FROM messages WHERE conversation_uuid = ?", (conv.uuid,)
         ).fetchone()[0]
         self.conn.executemany(
             """INSERT INTO messages
-               (uuid, conversation_uuid, position, parent_uuid, sender, text, created_at, updated_at,
+               (uuid, conversation_uuid, seq, parent_uuid, sender, text, created_at, updated_at,
                 raw_content, attachments, files)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             [
                 (
                     m.uuid,
                     conv.uuid,
-                    next_position + i,
+                    next_seq + i,
                     m.parent_uuid,
                     m.sender,
                     m.text,
@@ -442,12 +444,12 @@ class ConversationStore:
         本文や raw_content は読まず、線を選ぶのに必要な列だけを1回のクエリで読む。
         """
         rows = self.conn.execute(
-            "SELECT conversation_uuid, uuid, parent_uuid, created_at, position FROM messages ORDER BY position"
+            "SELECT conversation_uuid, uuid, parent_uuid, created_at, seq FROM messages ORDER BY seq"
         ).fetchall()
         by_conversation: dict[str, list[lines.Node]] = {}
         for row in rows:
             by_conversation.setdefault(row["conversation_uuid"], []).append(
-                lines.Node(row["uuid"], row["parent_uuid"], row["created_at"], row["position"])
+                lines.Node(row["uuid"], row["parent_uuid"], row["created_at"], row["seq"])
             )
         main_line_uuids = [uuid for nodes in by_conversation.values() for uuid in lines.select_line(nodes)]
         self.conn.execute("DELETE FROM main_line_messages")
@@ -493,14 +495,14 @@ class ConversationStore:
 
         total = self.conn.execute(f"SELECT count(*) FROM messages m WHERE {where.sql}", where.params).fetchone()[0]
         rows = self.conn.execute(
-            f"""SELECT m.conversation_uuid, c.name AS conversation_name, m.position, m.sender, m.created_at, m.text,
+            f"""SELECT m.conversation_uuid, c.name AS conversation_name, m.seq, m.sender, m.created_at, m.text,
                        ml.message_uuid IS NOT NULL AS on_main_line,
                        EXISTS (SELECT 1 FROM post_messages pm WHERE pm.message_uuid = m.uuid) AS posted
                 FROM messages m
                 JOIN conversations c ON c.uuid = m.conversation_uuid
                 LEFT JOIN main_line_messages ml ON ml.message_uuid = m.uuid
                 WHERE {where.sql}
-                ORDER BY m.created_at {_direction(order)}, m.position {_direction(order)}
+                ORDER BY m.created_at {_direction(order)}, m.seq {_direction(order)}
                 LIMIT ? OFFSET ?""",
             [*where.params, limit, offset],
         ).fetchall()
@@ -541,10 +543,10 @@ class ConversationStore:
                            AS text_message_count,
                        coalesce((SELECT m.text FROM messages m
                                  WHERE m.conversation_uuid = c.uuid AND m.sender = 'human' AND m.text != ''
-                                 ORDER BY m.position LIMIT 1), '') AS first_human_text,
+                                 ORDER BY m.seq LIMIT 1), '') AS first_human_text,
                        coalesce((SELECT m.created_at FROM messages m
                                  WHERE m.conversation_uuid = c.uuid
-                                 ORDER BY m.position DESC LIMIT 1), c.updated_at) AS last_message_at,
+                                 ORDER BY m.seq DESC LIMIT 1), c.updated_at) AS last_message_at,
                        (SELECT count(*) FROM posts p WHERE p.conversation_uuid = c.uuid) AS post_count,
                        (SELECT count(*) FROM main_line_messages ml
                                  JOIN messages m ON m.uuid = ml.message_uuid
@@ -559,22 +561,22 @@ class ConversationStore:
         ).fetchall()
         return Page(total, [ConversationInfo(**row) for row in rows])
 
-    def get_messages(self, conversation_uuid: str, start: int = 0, count: int | None = None) -> list[PositionedMessage]:
+    def get_messages(self, conversation_uuid: str, start: int = 0, count: int | None = None) -> list[StoredMessage]:
         rows = self.conn.execute(
-            """SELECT m.position, p.position AS parent_position,
+            """SELECT m.seq, p.seq AS parent_seq,
                       m.uuid, m.sender, m.text, m.created_at, m.updated_at, m.parent_uuid,
                       m.raw_content, m.attachments, m.files
                FROM messages m LEFT JOIN messages p ON p.uuid = m.parent_uuid
-               WHERE m.conversation_uuid = ? AND m.position >= ?
-               ORDER BY m.position
+               WHERE m.conversation_uuid = ? AND m.seq >= ?
+               ORDER BY m.seq
                LIMIT ?""",
             (conversation_uuid, start, -1 if count is None else count),  # LIMIT -1 は上限なし
         ).fetchall()
         notes = self._notes_for([row["uuid"] for row in rows])
         return [
-            PositionedMessage(
-                position=row["position"],
-                parent_position=row["parent_position"],
+            StoredMessage(
+                seq=row["seq"],
+                parent_seq=row["parent_seq"],
                 message=Message(
                     uuid=row["uuid"],
                     sender=row["sender"],
@@ -614,9 +616,7 @@ class ConversationStore:
         messages = self.get_messages(conversation_uuid)
         if not messages:
             return Line([], 0)
-        nodes = [
-            lines.Node(pm.message.uuid, pm.message.parent_uuid, pm.message.created_at, pm.position) for pm in messages
-        ]
+        nodes = [lines.Node(pm.message.uuid, pm.message.parent_uuid, pm.message.created_at, pm.seq) for pm in messages]
         by_uuid = {pm.message.uuid: pm for pm in messages}
         line_uuids = lines.select_line(nodes, through_index)
         return Line([by_uuid[uuid] for uuid in line_uuids], lines.count_leaves(nodes))
@@ -674,7 +674,7 @@ class ConversationStore:
         """この会話に記録された投稿を、記録した順に返す。"""
         rows = self.conn.execute(
             """SELECT p.id, p.service, p.url, p.title, p.member_uri,
-                      min(m.position) AS min_position, max(m.position) AS max_position,
+                      min(m.seq) AS min_seq, max(m.seq) AS max_seq,
                       group_concat(pm.message_uuid) AS message_uuids
                FROM posts p
                JOIN post_messages pm ON pm.post_id = p.id
@@ -690,8 +690,8 @@ class ConversationStore:
                 service=row["service"],
                 url=row["url"],
                 title=row["title"],
-                min_position=row["min_position"],
-                max_position=row["max_position"],
+                min_seq=row["min_seq"],
+                max_seq=row["max_seq"],
                 message_uuids=frozenset(row["message_uuids"].split(",")),
                 member_uri=row["member_uri"],
             )
@@ -714,7 +714,7 @@ class ConversationStore:
         ).fetchall()
         return {row["message_uuid"] for row in rows}
 
-    def unposted_start(self, line_messages: Sequence[PositionedMessage]) -> int | None:
+    def unposted_start(self, line_messages: Sequence[StoredMessage]) -> int | None:
         """1本の線の上で、まだ投稿していない部分の始まりの index。
 
         投稿がなければ線の最初の index。全部投稿済みなら None（呼び出し側でエラーにする）。
@@ -724,7 +724,7 @@ class ConversationStore:
             return 0
         line_uuids = [pm.message.uuid for pm in line_messages]
         i = lines.first_unposted(line_uuids, self._posted_uuids(line_uuids))
-        return None if i is None else line_messages[i].position
+        return None if i is None else line_messages[i].seq
 
     # --- 要約 ---
 

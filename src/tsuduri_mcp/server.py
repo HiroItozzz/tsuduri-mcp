@@ -21,7 +21,7 @@ from .store import (
     ConversationInfo,
     ConversationStore,
     Line,
-    PositionedMessage,
+    StoredMessage,
     Summary,
     SummaryKey,
     connect,
@@ -293,7 +293,7 @@ def export_conversation(
     text = render.render_markdown(info, scope, include_details)
     EXPORT_DIR.mkdir(parents=True, exist_ok=True)
     # 枝ごとにファイルを分け、書き出すたびに他の枝を上書きしないようにする
-    suffix = "all" if all_branches else f"to{scope.messages[-1].position if scope.messages else 0}"
+    suffix = "all" if all_branches else f"to{scope.messages[-1].seq if scope.messages else 0}"
     path = EXPORT_DIR / f"{conversation_uuid}-{suffix}.md"
     path.write_text(text, encoding="utf-8")
     return f"{path} に書き出しました（{len(scope.messages)} 件、{len(text)} 文字、{text.count(chr(10))} 行）"
@@ -308,13 +308,13 @@ def prompt_hash(text: str) -> str:
 
 def load_transcript(
     store: ConversationStore, conversation_uuid: str, line: Line, start: int
-) -> tuple[ConversationInfo, list[PositionedMessage], str]:
+) -> tuple[ConversationInfo, list[StoredMessage], str]:
     """すでに開いた store と、すでに選んだ線（line）から、LLM に渡す会話ログを作る。
 
-    line.messages のうち position >= start のものだけを使う。
+    line.messages のうち seq >= start のものだけを使う。
     """
     info = find_conversation(store, conversation_uuid)
-    messages = [pm for pm in line.messages if pm.position >= start]
+    messages = [pm for pm in line.messages if pm.seq >= start]
     if not messages:
         raise ValueError(f"index={start} 以降のメッセージがありません")
     transcript = render.render_transcript(info, messages)
@@ -437,7 +437,7 @@ def resolve_draft_start(store: ConversationStore, line: Line, start: int | None)
     unposted = store.unposted_start(line.messages)
     if unposted is None:
         raise ValueError("この枝はすでに全部投稿済みです（start=0 で全部を材料にできます）")
-    return unposted, render.skip_note(line.messages[0].position, unposted)
+    return unposted, render.skip_note(line.messages[0].seq, unposted)
 
 
 def draft_header_notes(
@@ -538,8 +538,8 @@ def resolve_post_range(
         if unposted is None:
             raise ValueError("この枝はすでに全部投稿済みです。start を指定してください")
         start = unposted
-    start, end = lines.check_range([pm.position for pm in line.messages], start, end)
-    message_uuids = [pm.message.uuid for pm in line.messages if start <= pm.position <= end]
+    start, end = lines.check_range([pm.seq for pm in line.messages], start, end)
+    message_uuids = [pm.message.uuid for pm in line.messages if start <= pm.seq <= end]
     return ResolvedRange(line, start, end, message_uuids)
 
 

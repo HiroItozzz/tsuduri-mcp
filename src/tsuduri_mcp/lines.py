@@ -14,11 +14,11 @@ class Node:
     uuid: str
     parent_uuid: str | None
     created_at: str
-    position: int
+    seq: int
 
 
 def select_line(nodes: Sequence[Node], through_index: int | None = None) -> list[str]:
-    """through_index のメッセージを通る線を選び、position 順（古い→新しい）の uuid を返す。
+    """through_index のメッセージを通る線を選び、seq 順（古い→新しい）の uuid を返す。
 
     そのメッセージより前は親をたどり、後はいちばん新しい続きをたどる。
     through_index を省くと、会話でいちばん新しいメッセージを通る線（本線）になる。
@@ -33,12 +33,12 @@ def select_line(nodes: Sequence[Node], through_index: int | None = None) -> list
             children.setdefault(n.parent_uuid, []).append(n)
 
     def newest(ns: Iterable[Node]) -> Node:
-        return max(ns, key=lambda n: (n.created_at, n.position))
+        return max(ns, key=lambda n: (n.created_at, n.seq))
 
     if through_index is None:
         through = newest(nodes)
     else:
-        found = [n for n in nodes if n.position == through_index]
+        found = [n for n in nodes if n.seq == through_index]
         if not found:
             raise ValueError(f"index={through_index} のメッセージはありません（0〜{len(nodes) - 1}）")
         through = found[0]
@@ -81,17 +81,17 @@ def first_unposted(line_uuids: Sequence[str], posted: Collection[str]) -> int | 
     return posted_i[-1] + 1
 
 
-def check_range(positions: Sequence[int], start: int, end: int | None) -> tuple[int, int]:
+def check_range(seqs: Sequence[int], start: int, end: int | None) -> tuple[int, int]:
     """線の上の範囲 start〜end（end を含む）を確かめ、決まった (start, end) を返す。
 
-    positions は線のメッセージの index を線の順に並べたもの（空でないこと）。
+    seqs は線のメッセージの index を線の順に並べたもの（空でないこと）。
     end を省くと線の最後の index にする。start・end が線の上にないか、start が end より後ろならエラー。
     """
-    first, last = positions[0], positions[-1]
+    first, last = seqs[0], seqs[-1]
     if end is None:
         end = last
     for index in (start, end):
-        if index not in positions:
+        if index not in seqs:
             raise ValueError(f"index={index} はこの枝にありません（{first}〜{last}）")
     if start > end:
         raise ValueError(f"start（{start}）が end（{end}）より後ろです")

@@ -10,7 +10,7 @@ def at(minute: int) -> str:
 
 
 def nodes(*specs: tuple[str, str | None]) -> list[Node]:
-    """(uuid, 親の uuid) を並べた順に、position と created_at（後ほど新しい）を振る。"""
+    """(uuid, 親の uuid) を並べた順に、seq と created_at（後ほど新しい）を振る。"""
     return [Node(uuid, parent, at(i), i) for i, (uuid, parent) in enumerate(specs)]
 
 
@@ -63,14 +63,14 @@ def test_line_through_old_root_stays_on_that_root():
     assert select_line(TWO_ROOTS, through_index=0) == ["a0", "a1"]
 
 
-def test_newest_is_decided_by_created_at_not_position():
-    # 並び順（position）では後ろでも、created_at が古い枝は本線にならない
+def test_newest_is_decided_by_created_at_not_seq():
+    # 並び順（seq）では後ろでも、created_at が古い枝は本線にならない
     ns = [Node("m0", None, at(0), 0), Node("new", "m0", at(5), 1), Node("old", "m0", at(1), 2)]
 
     assert select_line(ns) == ["m0", "new"]
 
 
-def test_same_created_at_is_decided_by_position():
+def test_same_created_at_is_decided_by_seq():
     ns = [Node("m0", None, at(0), 0), Node("x", "m0", at(1), 1), Node("y", "m0", at(1), 2)]
 
     assert select_line(ns) == ["m0", "y"]

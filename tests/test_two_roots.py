@@ -134,5 +134,5 @@ def test_post_default_range_is_the_newest_root(fake_poster):
 
     assert "index 2〜3（この枝の 2 件）" in result
     [posted] = list_posts()
-    assert (posted.min_position, posted.max_position) == (2, 3)
+    assert (posted.min_seq, posted.max_seq) == (2, 3)
     assert posted.message_uuids == {"b0", "b1"}
