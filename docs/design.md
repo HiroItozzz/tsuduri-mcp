@@ -164,11 +164,33 @@ MCP の prompt（クライアント自身に読ませて書かせるための指
 - PUT は記事を丸ごと置き換える。カテゴリーを省くと消える。`updated` を省いても `updated`・`published` は変わらず、`app:edited` だけが新しくなる。`author` は省いても通る
 - 仕様書によると、PUT で `app:draft` を省くと「下書きでない」とみなされて公開される。PUT を作るときは必ず `app:draft` を送る
 
+### 公開・予約・下書きに戻すの実験（2026-09-27、中身のない記事で試して削除した）
+
+- PUT でも、新規投稿（POST）と同じ要素が使える。仕様書の PUT の説明にはない `hatenablog:scheduled`（名前空間 `http://www.hatena.ne.jp/info/xmlns#hatenablog`）も効く
+- **予約**: `app:draft=yes`・`hatenablog:scheduled=yes`・`updated=未来の時刻` で PUT すると、その時刻まで下書きのまま（外からは 404）で、時刻が来ると公開される。応答と GET の `app:control` に `hatenablog:scheduled` が `yes` で入る。公開されると消える
+- **`scheduled` なしで未来の `updated` と `app:draft=no` を送ると、すぐ公開される**（日付だけ未来になる）。予約にはならない
+- **予約の取り消しは `hatenablog:scheduled=no` を明示する。** 省くと予約が残る（`updated` も、省くと前の値が残る）
+- **公開→下書き**: `app:draft=yes` で PUT すると外から 404 に戻る。URL はそのまま
+- 公開の URL は `updated` の時刻から作られる（`…/entry/2026/09/27/143826`）。公開のたびに `updated` を送ると URL が変わる。「公開したあとの URL は変わらない」のは `updated` を変えないとき
+- GET の `content` は Markdown の原文そのまま（見出し・リスト・コードブロック・HTML タグ・記号で確かめた）。GET した記事をそのまま PUT で送り返してよい
+
 ### 記録した記事の確認
 
 - `posts.member_uri` にメンバー URI を持つ（`post_blog_article` で記録したものだけ。`record_blog_post` の記録は NULL）
 - `check_blog_posts` は、記録した記事をはてなから GET して、下書きか公開か・今の URL・カテゴリー・本文の文字数を出す。URL が記録と違えば記録を今の URL に直す。見つからなければ「削除されたようです」と出すが、記録は消さない
-- 下書きを公開に変える PUT は、まだ作っていない（公開は取り消しにくいので、はてなの画面で人が押す流れにしている）
+- 記録の番号を `post=<id>` として表示する（`check_blog_posts` と `draft_blog_post` の投稿一覧）。公開・下書きに戻すツールはこの番号で記事を指す。下書きの URL は編集のたびに変わるので、URL では指さない
+- 予約中の記事は「予約（公開 <時刻>）」と表示する
+
+### 公開と下書きに戻す（`publish_blog_post` / `unpublish_blog_post`）
+
+- 引数は `conversation_uuid` と `post_id`。`record_blog_post` で記録したもの（メンバー URI がない）は扱えないエラーにする
+- 送る中身は、はてなから GET した今の記事（タイトル・本文・カテゴリー）。手元の下書きではない。はてなの画面で直した分を消さないため。PUT は丸ごと置き換えで、カテゴリーを省くと消えるので、GET したものを全部送り返す
+- **公開は既定で1分後の予約**（`delay_minutes=1`）。公開までの間に `unpublish_blog_post` で取り消せる。また `updated` を送らないと投稿日時が下書きを作ったときのままになり、古い日付の記事として並ぶので、公開する時刻を必ず送る。`delay_minutes=0` なら `app:draft=no`・`scheduled=no`・`updated=今` ですぐ公開する
+- **下書きに戻す**は `app:draft=yes`・`hatenablog:scheduled=no` を送り、`updated` は送らない（予約中なら取り消しになり、公開中なら下書きに戻る。URL は変えない）
+- 公開は取り消しにくいので、**`confirm=true` のときだけ実行する**。省いたら何もせず、タイトル・カテゴリー・本文の文字数・公開する時刻（下書きに戻すときは今の状態）を見せて、`confirm=true` で呼ぶよう案内する。クライアントがツールの実行を確かめずに通す設定でも、サーバー側でひと手間はさむため
+- すでに公開・予約中の記事の公開、すでに下書き（予約なし）の記事を下書きに戻すことは、PUT せずにそう伝える。はてなで見つからなければエラー
+- 実行したら、記録の URL を応答の URL に更新する。予約した記事の URL は公開の時刻に変わるので、公開後に `check_blog_posts` で直ることを伝える
+- `BlogPoster` に `publish(member_uri, article, at)` と `unpublish(member_uri, article)` を足す。予約の有無はサービスごとに違うので、インターフェースは「いつ公開するか」だけを受け取る（`at=None` ならすぐ）
 
 ## DB の版
 
@@ -215,7 +237,6 @@ ruff（リント・整形）と ty（型チェック）。`uv run ruff check . &
 - DB の移行のしくみ
   - 1つの版で SQL を複数流せるようにする（`MIGRATIONS` の SQL をリストにする）。そのうえで、`idx_messages_position` と中身が重なっている `idx_messages_conversation` を消す
   - 移行を流す前に DB を自動でコピーしておく（元に戻す手順がなく、投稿の記録と要約は DB にしかないため）
-- 下書きを公開に変える PUT（`app:draft` を必ず送る。カテゴリーも送り直す）。ほしくなったら
 - Windows の Claude デスクトップで試す（README に設定例あり）
 - 投稿の一覧を出すツールや、記録の取り消し。使ってみて必要なら
 - 枝の一覧を出すツール（各枝の最後の発言の冒頭と日時）。使ってみて必要なら
