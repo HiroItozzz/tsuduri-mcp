@@ -3,6 +3,7 @@ import sqlite3
 
 import pytest
 
+from tsuduri_mcp import store as store_module
 from tsuduri_mcp.sources import ClaudeExportSource
 from tsuduri_mcp.store import MIGRATIONS, SCHEMA, ConversationStore, connect
 
@@ -380,5 +381,91 @@ def test_reopening_a_migrated_db_does_not_fail(tmp_path):
     try:
         ConversationStore(conn)  # 2回目に開いても、移行をやり直さず壊れない
         assert conn.execute("PRAGMA user_version").fetchone()[0] == len(MIGRATIONS)
+    finally:
+        conn.close()
+
+
+def test_migration_failure_rolls_back_everything(tmp_path, monkeypatch):
+    """途中の SQL が失敗したら、その回に流した分は全部巻き戻る。"""
+    broken = [*MIGRATIONS, (len(MIGRATIONS) + 1, ["CREATE TABLE dummy_migration_check (id INTEGER)", "NOT VALID SQL"])]
+    monkeypatch.setattr(store_module, "MIGRATIONS", broken)
+    conn = connect(tmp_path / "broken.db")
+    try:
+        with pytest.raises(sqlite3.OperationalError):
+            ConversationStore(conn)
+
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 0  # 版1〜5もまとめて巻き戻る
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        assert "dummy_migration_check" not in tables  # 正しい方の SQL の結果も残っていない
+    finally:
+        conn.close()
+
+
+def test_migrating_from_version_4_backs_up_and_drops_duplicate_index(tmp_path):
+    path = tmp_path / "v4.db"
+    conn = connect(path)
+    ConversationStore(conn)  # 一度最新まで作ってから、版4だった頃の形に戻す
+    conn.execute("CREATE INDEX idx_messages_conversation ON messages(conversation_uuid, seq)")  # 版5で消す前の索引
+    conn.execute("PRAGMA user_version = 4")
+    conn.execute(
+        "INSERT INTO conversations (uuid, name, summary, created_at, updated_at) VALUES ('c1', '名前', '', 't', 't')"
+    )
+    conn.commit()
+    conn.close()
+
+    conn = connect(path)
+    try:
+        ConversationStore(conn)
+
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == len(MIGRATIONS)
+        indexes = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'")}
+        assert "idx_messages_conversation" not in indexes
+
+        backups = list(tmp_path.glob("v4.db.v4-*.bak"))
+        assert len(backups) == 1
+        backup_conn = connect(backups[0])
+        try:
+            row = backup_conn.execute("SELECT uuid FROM conversations").fetchone()
+            assert row["uuid"] == "c1"  # コピーには移行前の中身が入っている
+        finally:
+            backup_conn.close()
+    finally:
+        conn.close()
+
+
+def test_no_backup_when_already_latest_or_new_or_in_memory(tmp_path):
+    path = tmp_path / "latest.db"
+    conn = connect(path)
+    ConversationStore(conn)
+    conn.close()
+    conn = connect(path)
+    try:
+        ConversationStore(conn)  # 最新の DB を開き直してもコピーはできない
+    finally:
+        conn.close()
+    assert list(tmp_path.glob("*.bak")) == []
+
+    new_conn = connect(tmp_path / "new.db")
+    try:
+        ConversationStore(new_conn)  # 新しい DB（版0）でもコピーはできない
+    finally:
+        new_conn.close()
+    assert list(tmp_path.glob("*.bak")) == []
+
+    memory_conn = connect(":memory:")
+    try:
+        ConversationStore(memory_conn)  # :memory: でもエラーにならない
+    finally:
+        memory_conn.close()
+
+
+def test_new_db_has_no_duplicate_index_but_keeps_unique_position_index(tmp_path):
+    conn = connect(tmp_path / "new.db")
+    try:
+        ConversationStore(conn)
+
+        indexes = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'")}
+        assert "idx_messages_conversation" not in indexes
+        assert "idx_messages_position" in indexes
     finally:
         conn.close()

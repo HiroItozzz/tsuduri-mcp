@@ -4,6 +4,7 @@ import os
 import sqlite3
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
@@ -38,7 +39,6 @@ CREATE TABLE IF NOT EXISTS messages (
     files             TEXT NOT NULL         -- JSON
 );
 
-CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_uuid, position);
 CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at);
 
 -- trigram は3文字以上の部分一致に使える。2文字以下は LIKE で探す
@@ -136,31 +136,70 @@ def connect(path: Path | str) -> sqlite3.Connection:
 
 # --- DB の版 ---
 
-# (版番号, その版に上げる SQL)。version は 1 から始まる連番で、古い版から順に適用する
-MIGRATIONS: list[tuple[int, str]] = [
-    (1, "ALTER TABLE posts ADD COLUMN member_uri TEXT"),  # はてなの記事を指す不変の URI。既存の行は NULL のまま
+# (版番号, その版に上げる SQL のリスト)。version は 1 から始まる連番で、古い版から順に適用する
+MIGRATIONS: list[tuple[int, list[str]]] = [
+    (1, ["ALTER TABLE posts ADD COLUMN member_uri TEXT"]),  # はてなの記事を指す不変の URI。既存の行は NULL のまま
     # 会話の中で index が重ならないことを DB でも保証する。重なりがあれば取り込みがエラーで止まる
-    (2, "CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_position ON messages(conversation_uuid, position)"),
+    (2, ["CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_position ON messages(conversation_uuid, position)"]),
     # position はエクスポートの中の位置ではなくなったので、名前を中身に合わせる。索引の定義の列名も SQLite が書き換える
-    (3, "ALTER TABLE messages RENAME COLUMN position TO seq"),
+    (3, ["ALTER TABLE messages RENAME COLUMN position TO seq"]),
     # list_conversations の post_count が posts を conversation_uuid で絞るため
-    (4, "CREATE INDEX IF NOT EXISTS idx_posts_conversation ON posts(conversation_uuid)"),
+    (4, ["CREATE INDEX IF NOT EXISTS idx_posts_conversation ON posts(conversation_uuid)"]),
+    # 版2の UNIQUE な idx_messages_position と中身が同じだった索引を消す
+    (5, ["DROP INDEX IF EXISTS idx_messages_conversation"]),
 ]
 
 
+def _backup_before_migration(conn: sqlite3.Connection, current_version: int) -> None:
+    """移行を流す前に、ファイルの DB ならコピーを作る（元に戻す手順がなく、DB にしかないデータがあるため）。
+
+    同じ名前のファイルがもうあれば作り直さない。`:memory:` のときは何もしない。
+    """
+    db_path = conn.execute("PRAGMA database_list").fetchone()[2]  # main は最初の行。列は (seq, name, file)
+    if not db_path:
+        return
+    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    path = Path(db_path)
+    backup_path = path.with_name(f"{path.name}.v{current_version}-{timestamp}.bak")
+    if backup_path.exists():
+        return
+    backup_conn = sqlite3.connect(backup_path)
+    try:
+        conn.backup(backup_conn)
+    finally:
+        backup_conn.close()
+    logger.warning("移行の前に DB をコピーしました: %s", backup_path)
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
-    """PRAGMA user_version を見て、今の版より新しい移行だけを順に実行する。SCHEMA を流したあとに呼ぶ。
+    """PRAGMA user_version を見て、今の版より新しい移行だけをまとめて1トランザクションで実行する。
+
+    SCHEMA を流したあとに呼ぶ。
 
     新しい DB（版0）でも古い DB でも、同じ道筋で最新の版になる。
-    DDL と PRAGMA では sqlite3 が BEGIN を出さないので、`with conn:` があっても1トランザクションにはなっていない。
+    `BEGIN IMMEDIATE` を明示して書き込みロックを取るので、複数のプロセスが同時に開いても、
+    片方が待っているあいだにもう片方が移行を終えていれば、トランザクションの中で読み直して何もしない。
     """
     current = conn.execute("PRAGMA user_version").fetchone()[0]
-    for version, sql in MIGRATIONS:
-        if version <= current:
-            continue
-        with conn:
-            conn.execute(sql)
+    remaining = [(version, sqls) for version, sqls in MIGRATIONS if version > current]
+    if not remaining:
+        return
+    if current >= 1:
+        _backup_before_migration(conn, current)
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        current = conn.execute("PRAGMA user_version").fetchone()[0]
+        for version, sqls in MIGRATIONS:
+            if version <= current:
+                continue
+            for sql in sqls:
+                conn.execute(sql)
             conn.execute(f"PRAGMA user_version = {version}")
+    except BaseException:
+        if conn.in_transaction:  # SQLite がエラーで自分から巻き戻していることがある
+            conn.rollback()
+        raise
+    conn.commit()
 
 
 @dataclass
