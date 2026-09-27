@@ -1,9 +1,11 @@
+import contextlib
 import json
 import logging
 import os
 import sqlite3
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
@@ -136,31 +138,81 @@ def connect(path: Path | str) -> sqlite3.Connection:
 
 # --- DB の版 ---
 
-# (版番号, その版に上げる SQL)。version は 1 から始まる連番で、古い版から順に適用する
-MIGRATIONS: list[tuple[int, str]] = [
-    (1, "ALTER TABLE posts ADD COLUMN member_uri TEXT"),  # はてなの記事を指す不変の URI。既存の行は NULL のまま
+# (版番号, その版に上げる SQL のリスト)。version は 1 から始まる連番で、古い版から順に適用する
+MIGRATIONS: list[tuple[int, list[str]]] = [
+    (1, ["ALTER TABLE posts ADD COLUMN member_uri TEXT"]),  # はてなの記事を指す不変の URI。既存の行は NULL のまま
     # 会話の中で index が重ならないことを DB でも保証する。重なりがあれば取り込みがエラーで止まる
-    (2, "CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_position ON messages(conversation_uuid, position)"),
+    (2, ["CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_position ON messages(conversation_uuid, position)"]),
     # position はエクスポートの中の位置ではなくなったので、名前を中身に合わせる。索引の定義の列名も SQLite が書き換える
-    (3, "ALTER TABLE messages RENAME COLUMN position TO seq"),
+    (3, ["ALTER TABLE messages RENAME COLUMN position TO seq"]),
     # list_conversations の post_count が posts を conversation_uuid で絞るため
-    (4, "CREATE INDEX IF NOT EXISTS idx_posts_conversation ON posts(conversation_uuid)"),
+    (4, ["CREATE INDEX IF NOT EXISTS idx_posts_conversation ON posts(conversation_uuid)"]),
 ]
 
 
+def _backup_before_migration(conn: sqlite3.Connection, current_version: int) -> None:
+    """移行を流す前に、ファイルの DB ならコピーを作る（元に戻す手順がなく、DB にしかないデータがあるため）。
+
+    同じ版のコピーがもうあれば作らない。`:memory:` のときは何もしない。
+    コピー先は排他的に作り、作れたプロセスだけがコピーする（同じ秒に2つのプロセスが開いたとき）。
+    """
+    db_path = conn.execute("PRAGMA database_list").fetchone()[2]  # main は最初の行。列は (seq, name, file)
+    if not db_path:
+        return
+    path = Path(db_path)
+    prefix = f"{path.name}.v{current_version}-"
+    # glob だと DB のファイル名の [ や * が記号として解釈されるので、文字どおりに比べる
+    if any(p.name.startswith(prefix) and p.name.endswith(".bak") for p in path.parent.iterdir()):
+        return
+    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    backup_path = path.with_name(f"{prefix}{timestamp}.bak")
+    try:
+        backup_path.touch(exist_ok=False)
+    except FileExistsError:
+        return
+    try:
+        backup_conn = sqlite3.connect(backup_path)
+        try:
+            conn.backup(backup_conn)
+        finally:
+            backup_conn.close()
+    except BaseException:
+        logger.error("移行の前のコピーに失敗しました: %s", backup_path)
+        with contextlib.suppress(OSError):  # 削除の失敗で元の例外を隠さない
+            backup_path.unlink(missing_ok=True)
+        raise
+    logger.warning("移行の前に DB をコピーしました: %s", backup_path)
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
-    """PRAGMA user_version を見て、今の版より新しい移行だけを順に実行する。SCHEMA を流したあとに呼ぶ。
+    """PRAGMA user_version を見て、今の版より新しい移行だけをまとめて1トランザクションで実行する。
+
+    SCHEMA を流したあとに呼ぶ。
 
     新しい DB（版0）でも古い DB でも、同じ道筋で最新の版になる。
-    DDL と PRAGMA では sqlite3 が BEGIN を出さないので、`with conn:` があっても1トランザクションにはなっていない。
+    `BEGIN IMMEDIATE` を明示して書き込みロックを取るので、複数のプロセスが同時に開いても、
+    片方が待っているあいだにもう片方が移行を終えていれば、トランザクションの中で読み直して何もしない。
     """
     current = conn.execute("PRAGMA user_version").fetchone()[0]
-    for version, sql in MIGRATIONS:
-        if version <= current:
-            continue
-        with conn:
-            conn.execute(sql)
+    remaining = [(version, sqls) for version, sqls in MIGRATIONS if version > current]
+    if not remaining:
+        return
+    if current >= 1:
+        _backup_before_migration(conn, current)
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        current = conn.execute("PRAGMA user_version").fetchone()[0]
+        for version, sqls in MIGRATIONS:
+            if version <= current:
+                continue
+            for sql in sqls:
+                conn.execute(sql)
             conn.execute(f"PRAGMA user_version = {version}")
+        conn.commit()
+    except BaseException:
+        if conn.in_transaction:  # SQLite がエラーで自分から巻き戻していることがある
+            conn.rollback()
+        raise
 
 
 @dataclass
