@@ -251,6 +251,23 @@ def test_list_marks_conversation_without_text(tmp_path, monkeypatch):
     assert "本文なし" in server.list_conversations()
 
 
+def test_list_marks_conversation_without_messages(tmp_path, monkeypatch):
+    empty = raw_conversation("c-empty", [], name="空の会話")
+    src = tmp_path / "empty.json"
+    src.write_text(json.dumps([empty], ensure_ascii=False), encoding="utf-8")
+    path = tmp_path / "empty.db"
+    conn = connect(path)
+    ConversationStore(conn).import_conversations(ClaudeExportSource(src).load())
+    conn.close()
+    monkeypatch.setenv("TSUDURI_DB", str(path))
+
+    result = server.list_conversations()
+
+    assert "最終発言 なし（会話の更新 " in result  # 発言がないのに最終発言の日時があるように見せない
+    assert "| 0 件 | メッセージなし" in result
+    assert "本文なし" not in result
+
+
 # --- クライアントと同じ経路（mcp.call_tool）で呼んだときのエラー文言 ---
 # MCPServer は ToolError 以外の例外だと文言を消してしまうので、こちらの文言が消えていないかを確かめる
 
