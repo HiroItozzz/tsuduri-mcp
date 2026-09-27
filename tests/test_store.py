@@ -394,41 +394,150 @@ def test_migration_failure_rolls_back_everything(tmp_path, monkeypatch):
         with pytest.raises(sqlite3.OperationalError):
             ConversationStore(conn)
 
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 0  # 版1〜5もまとめて巻き戻る
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 0  # 版1〜4もまとめて巻き戻る
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
         assert "dummy_migration_check" not in tables  # 正しい方の SQL の結果も残っていない
     finally:
         conn.close()
 
 
-def test_migrating_from_version_4_backs_up_and_drops_duplicate_index(tmp_path):
-    path = tmp_path / "v4.db"
+def test_backup_before_migration_includes_wal_contents(tmp_path, monkeypatch):
+    """コピーには WAL に残ったままの分（まだ本体に書き戻していない分）も含まれる。"""
+    path = tmp_path / "wal.db"
     conn = connect(path)
-    ConversationStore(conn)  # 一度最新まで作ってから、版4だった頃の形に戻す
-    conn.execute("CREATE INDEX idx_messages_conversation ON messages(conversation_uuid, seq)")  # 版5で消す前の索引
-    conn.execute("PRAGMA user_version = 4")
-    conn.execute(
+    ConversationStore(conn)  # 先に最新の版にしておく
+    conn.close()
+
+    # checkpoint を止めて、別の接続で行を入れる。WAL に残ったままになる
+    writer_conn = connect(path)
+    writer_conn.execute("PRAGMA wal_autocheckpoint = 0")
+    writer_conn.execute(
         "INSERT INTO conversations (uuid, name, summary, created_at, updated_at) VALUES ('c1', '名前', '', 't', 't')"
     )
-    conn.commit()
+    writer_conn.commit()
+
+    latest_version = len(MIGRATIONS)
+    monkeypatch.setattr(
+        store_module, "MIGRATIONS", [*MIGRATIONS, (latest_version + 1, ["CREATE TABLE extra_check (id INTEGER)"])]
+    )
+
+    conn = connect(path)
+    try:
+        ConversationStore(conn)  # writer_conn を開いたまま移行する
+
+        backups = list(tmp_path.glob(f"wal.db.v{latest_version}-*.bak"))
+        assert len(backups) == 1
+        backup_conn = connect(backups[0])
+        try:
+            row = backup_conn.execute("SELECT uuid FROM conversations").fetchone()
+            assert row["uuid"] == "c1"  # WAL のままだった行もコピーに入っている
+        finally:
+            backup_conn.close()
+    finally:
+        conn.close()
+        writer_conn.close()
+
+
+def test_backup_skipped_if_already_exists_for_this_version(tmp_path, monkeypatch):
+    path = tmp_path / "existing.db"
+    conn = connect(path)
+    ConversationStore(conn)
     conn.close()
+
+    latest_version = len(MIGRATIONS)
+    dummy_backup = path.with_name(f"{path.name}.v{latest_version}-20260101T000000Z.bak")
+    dummy_backup.write_bytes(b"")
+    monkeypatch.setattr(
+        store_module, "MIGRATIONS", [*MIGRATIONS, (latest_version + 1, ["CREATE TABLE extra_check (id INTEGER)"])]
+    )
 
     conn = connect(path)
     try:
         ConversationStore(conn)
 
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == len(MIGRATIONS)
-        indexes = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'")}
-        assert "idx_messages_conversation" not in indexes
+        backups = list(tmp_path.glob(f"existing.db.v{latest_version}-*.bak"))
+        assert backups == [dummy_backup]  # 同じ版のコピーがすでにあるので増えない
+    finally:
+        conn.close()
 
-        backups = list(tmp_path.glob("v4.db.v4-*.bak"))
-        assert len(backups) == 1
-        backup_conn = connect(backups[0])
+
+class _BrokenBackupConnection(sqlite3.Connection):
+    """sqlite3.Connection は不変の型で backup を直接差し替えられないので、サブクラスで上書きする。"""
+
+    def backup(self, *args: object, **kwargs: object) -> None:
+        raise sqlite3.OperationalError("disk full（テスト用）")
+
+
+def test_backup_before_migration_cleans_up_partial_file_on_failure(tmp_path, monkeypatch, caplog):
+    path = tmp_path / "fail.db"
+    setup_conn = connect(path)
+    ConversationStore(setup_conn)
+    setup_conn.close()
+
+    latest_version = len(MIGRATIONS)
+    monkeypatch.setattr(
+        store_module, "MIGRATIONS", [*MIGRATIONS, (latest_version + 1, ["CREATE TABLE extra_check (id INTEGER)"])]
+    )
+
+    conn = sqlite3.connect(path, factory=_BrokenBackupConnection)
+    try:
+        with pytest.raises(sqlite3.OperationalError):
+            ConversationStore(conn)
+    finally:
+        conn.close()
+
+    assert list(tmp_path.glob(f"fail.db.v{latest_version}-*.bak")) == []  # コピー先の途中までのファイルは消える
+    assert "移行の前のコピーに失敗しました" in caplog.text
+
+
+def test_migration_rereads_version_inside_transaction(tmp_path, monkeypatch):
+    """コピーを取っているあいだに別の接続が移行を終えていたら、トランザクションの中で読み直して何もしない。"""
+    path = tmp_path / "race.db"
+    conn = connect(path)
+    ConversationStore(conn)  # 先に最新の版にしておく
+    conn.close()
+
+    latest_version = len(MIGRATIONS)
+    # IF NOT EXISTS がない SQL なので、同じ版を2回流すとエラーになる（冪等でない）
+    monkeypatch.setattr(
+        store_module, "MIGRATIONS", [*MIGRATIONS, (latest_version + 1, ["CREATE TABLE extra_check (id INTEGER)"])]
+    )
+
+    original_backup = store_module._backup_before_migration
+    already_raced = False
+
+    def racing_backup(conn: sqlite3.Connection, current_version: int) -> None:
+        nonlocal already_raced
+        if already_raced:  # 別の接続の中で呼ばれたときは、いつも通りに振る舞う
+            original_backup(conn, current_version)
+            return
+        already_raced = True
+        other_conn = connect(path)
         try:
-            row = backup_conn.execute("SELECT uuid FROM conversations").fetchone()
-            assert row["uuid"] == "c1"  # コピーには移行前の中身が入っている
+            store_module._migrate(other_conn)  # 別の接続で先に移行を最後まで済ませてしまう
         finally:
-            backup_conn.close()
+            other_conn.close()
+
+    monkeypatch.setattr(store_module, "_backup_before_migration", racing_backup)
+
+    conn = connect(path)
+    try:
+        ConversationStore(conn)  # ここでエラーにならない
+
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == latest_version + 1
+    finally:
+        conn.close()
+
+
+def test_new_db_has_both_message_indexes(tmp_path):
+    """idx_messages_conversation は idx_messages_position と中身が同じだが、古い SCHEMA が困るので消さない。"""
+    conn = connect(tmp_path / "new.db")
+    try:
+        ConversationStore(conn)
+
+        indexes = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'")}
+        assert "idx_messages_conversation" in indexes
+        assert "idx_messages_position" in indexes
     finally:
         conn.close()
 
@@ -457,15 +566,3 @@ def test_no_backup_when_already_latest_or_new_or_in_memory(tmp_path):
         ConversationStore(memory_conn)  # :memory: でもエラーにならない
     finally:
         memory_conn.close()
-
-
-def test_new_db_has_no_duplicate_index_but_keeps_unique_position_index(tmp_path):
-    conn = connect(tmp_path / "new.db")
-    try:
-        ConversationStore(conn)
-
-        indexes = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'")}
-        assert "idx_messages_conversation" not in indexes
-        assert "idx_messages_position" in indexes
-    finally:
-        conn.close()

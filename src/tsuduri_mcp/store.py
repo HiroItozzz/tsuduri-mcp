@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS messages (
     files             TEXT NOT NULL         -- JSON
 );
 
+CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_uuid, position);
 CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at);
 
 -- trigram は3文字以上の部分一致に使える。2文字以下は LIKE で探す
@@ -145,29 +146,32 @@ MIGRATIONS: list[tuple[int, list[str]]] = [
     (3, ["ALTER TABLE messages RENAME COLUMN position TO seq"]),
     # list_conversations の post_count が posts を conversation_uuid で絞るため
     (4, ["CREATE INDEX IF NOT EXISTS idx_posts_conversation ON posts(conversation_uuid)"]),
-    # 版2の UNIQUE な idx_messages_position と中身が同じだった索引を消す
-    (5, ["DROP INDEX IF EXISTS idx_messages_conversation"]),
 ]
 
 
 def _backup_before_migration(conn: sqlite3.Connection, current_version: int) -> None:
     """移行を流す前に、ファイルの DB ならコピーを作る（元に戻す手順がなく、DB にしかないデータがあるため）。
 
-    同じ名前のファイルがもうあれば作り直さない。`:memory:` のときは何もしない。
+    同じ版のコピーがもうあれば作らない。`:memory:` のときは何もしない。
     """
     db_path = conn.execute("PRAGMA database_list").fetchone()[2]  # main は最初の行。列は (seq, name, file)
     if not db_path:
         return
-    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     path = Path(db_path)
-    backup_path = path.with_name(f"{path.name}.v{current_version}-{timestamp}.bak")
-    if backup_path.exists():
+    if any(path.parent.glob(f"{path.name}.v{current_version}-*.bak")):
         return
-    backup_conn = sqlite3.connect(backup_path)
+    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    backup_path = path.with_name(f"{path.name}.v{current_version}-{timestamp}.bak")
     try:
-        conn.backup(backup_conn)
-    finally:
-        backup_conn.close()
+        backup_conn = sqlite3.connect(backup_path)
+        try:
+            conn.backup(backup_conn)
+        finally:
+            backup_conn.close()
+    except BaseException:
+        backup_path.unlink(missing_ok=True)
+        logger.error("移行の前のコピーに失敗しました: %s", backup_path)
+        raise
     logger.warning("移行の前に DB をコピーしました: %s", backup_path)
 
 
@@ -195,11 +199,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
             for sql in sqls:
                 conn.execute(sql)
             conn.execute(f"PRAGMA user_version = {version}")
+        conn.commit()
     except BaseException:
         if conn.in_transaction:  # SQLite がエラーで自分から巻き戻していることがある
             conn.rollback()
         raise
-    conn.commit()
 
 
 @dataclass
