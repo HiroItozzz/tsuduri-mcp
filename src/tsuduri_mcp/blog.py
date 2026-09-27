@@ -69,7 +69,7 @@ class BlogPoster(ABC):
 
     @abstractmethod
     async def unpublish(self, member_uri: str, article: BlogArticle) -> PostResult:
-        """member_uri の記事を下書きに戻す（予約中なら予約も取り消す）。URL は変えない。"""
+        """member_uri の記事を下書きに戻す（予約中なら予約も取り消す）。"""
         ...
 
 

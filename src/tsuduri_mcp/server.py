@@ -660,7 +660,9 @@ async def post_blog_article(
     )
     try:
         with open_store() as store:
-            store.record_post(conversation_uuid, service, result.url, title, resolved.message_uuids, result.member_uri)
+            post_id = store.record_post(
+                conversation_uuid, service, result.url, title, resolved.message_uuids, result.member_uri
+            )
     except Exception as e:  # 投稿は済んでいるので、どんな失敗でも URL を返す
         through_arg = f", through_index={through_index}" if through_index is not None else ""
         raise RuntimeError(
@@ -676,8 +678,10 @@ async def post_blog_article(
         head = f"公開しました: {result.url}（編集: {result.edit_url}）。"
     body = (
         head + f"conversation={conversation_uuid} の index {resolved.start}〜{resolved.end}"
-        f"（この枝の {len(resolved.message_uuids)} 件）を記録しました"
+        f"（この枝の {len(resolved.message_uuids)} 件）を post={post_id} として記録しました"
     )
+    if result.is_draft:
+        body += f"\n公開するときは publish_blog_post(post_id={post_id}) を使う"
     return f"{duplicate_note}\n\n{body}" if duplicate_note else body
 
 
@@ -775,7 +779,11 @@ async def publish_blog_post(
     now = datetime.now(blog.JST).replace(microsecond=0)
     at = None if delay_minutes == 0 else now + timedelta(minutes=delay_minutes)
     if not confirm:
-        when = "すぐ公開します" if at is None else f"{at.isoformat()} に公開するよう予約します"
+        when = (
+            "すぐ公開します"
+            if at is None
+            else f"confirm=true で呼んだ時刻の {delay_minutes} 分後に公開するよう予約します（今なら {at.isoformat()}）"
+        )
         return f"{detail}\n{when}。この内容で実行するには confirm=true で呼んでください"
 
     article = blog.BlogArticle(title=fetched.title, content=fetched.content, categories=fetched.categories)
@@ -797,7 +805,7 @@ async def publish_blog_post(
         return f"{detail}\n公開しました: {result.url}"
     return (
         f"{detail}\n{at.isoformat()} に公開するよう予約しました。それまでは unpublish_blog_post で取り消せます\n"
-        f"編集: {result.edit_url}\n"
+        f"今の URL: {result.url} / 編集: {result.edit_url}\n"
         "（予約した記事の URL は公開の時刻に変わります。公開後に check_blog_posts で記録が直ります）"
     )
 
@@ -808,7 +816,9 @@ async def unpublish_blog_post(
     post_id: Annotated[int, Field(description="check_blog_posts や draft_blog_post に出る post=<id>")],
     confirm: Annotated[bool, Field(description="true のときだけ実際に下書きに戻す")] = False,
 ) -> str:
-    """記録した記事をはてなで下書きに戻す（予約中なら予約を取り消す）。URL は変えない。
+    """記録した記事をはてなで下書きに戻す（予約中なら予約を取り消す）。
+
+    公開中の記事の URL は変わらない。予約中の記事は下書きの編集と同じ扱いで URL が変わる（記録も更新する）。
 
     はてなから読み出した今の記事（タイトル・本文・カテゴリー）をそのまま使う。手元の下書きは使わない。
     confirm=true を渡すまでは何も変更せず、今の状態を見せるだけ。すでに下書き（予約なし）なら何もしない。

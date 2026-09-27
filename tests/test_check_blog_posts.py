@@ -171,6 +171,24 @@ def test_scheduled_article_is_shown_as_reserved(monkeypatch):
     assert "下書き" not in result
 
 
+def test_draft_does_not_show_the_leftover_updated(monkeypatch):
+    # 予約を取り消した下書きには、取り消した予約の時刻が updated に残っている
+    record_post()
+
+    result, _ = check(monkeypatch, fetched(updated="2026-12-31T09:00:00+09:00", edited="2026-09-27T10:00:00+09:00"))
+
+    assert "2026-12-31T09:00:00+09:00" not in result
+    assert "最終編集 2026-09-27T10:00:00+09:00" in result
+
+
+def test_published_article_shows_the_post_date(monkeypatch):
+    record_post()
+
+    result, _ = check(monkeypatch, fetched(is_draft=False, updated="2026-09-27T11:00:00+09:00"))
+
+    assert "投稿日時 2026-09-27T11:00:00+09:00" in result
+
+
 def test_content_is_shown_only_when_include_content_is_true(monkeypatch):
     record_post()
 

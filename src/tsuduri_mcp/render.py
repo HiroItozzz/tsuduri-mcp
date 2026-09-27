@@ -304,7 +304,10 @@ def render_post_status(p: PostRecord, fetched: FetchedArticle, url_updated: bool
         f"  {status} / URL: {fetched.url}" + ("（記録と違ったので更新しました）" if url_updated else ""),
         f"  編集: {fetched.edit_url}",
         f"  カテゴリー: {', '.join(fetched.categories) if fetched.categories else 'なし'}",
-        f"  本文 {len(fetched.content)} 文字 / updated {fetched.updated} / edited {fetched.edited}",
+        # 下書きの updated は、取り消した予約の時刻などが残っていて紛らわしいので出さない
+        f"  本文 {len(fetched.content)} 文字"
+        + ("" if fetched.is_draft and not fetched.scheduled else f" / 投稿日時 {fetched.updated}")
+        + f" / 最終編集 {fetched.edited}",
     ]
     if include_content:
         lines += ["", fetched.content]

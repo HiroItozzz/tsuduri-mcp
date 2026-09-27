@@ -111,6 +111,8 @@ def test_posts_and_records_the_range(fake_poster):
     assert "https://blog.example.com/entry/1" in result
     assert "https://blog.hatena.ne.jp/user/blog.example.com/edit?entry=1" in result
     assert "index 0〜2（この枝の 2 件）" in result
+    assert f"post={posts[0].id} として記録しました" in result
+    assert f"publish_blog_post(post_id={posts[0].id})" in result  # 下書きなら、公開の次の一手を書く
 
 
 def test_publish_true_posts_without_draft(fake_poster):
