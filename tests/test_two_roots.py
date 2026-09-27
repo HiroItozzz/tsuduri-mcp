@@ -104,7 +104,7 @@ def test_draft_default_starts_at_the_newest_root_without_skip_note(gemini):
     result = draft()
 
     assert "index 2〜3（この枝の 2 件）の下書き" in result
-    assert "投稿済みなので" not in result  # 線の最初から始めるので、飛ばした範囲はない
+    assert "より前に投稿済みの部分" not in result  # 線の最初から始めるので、飛ばした範囲はない
     assert "この会話は枝が 2 本あります" in result
 
 
@@ -114,7 +114,7 @@ def test_draft_default_skips_the_posted_part_of_the_main_line(gemini):
     result = draft()
 
     assert "index 3〜3（この枝の 1 件）の下書き" in result
-    assert "index 2〜2 は投稿済みなので index 3 から" in result
+    assert "index 3 より前に投稿済みの部分があるので index 3 から" in result
 
 
 def test_draft_is_not_affected_by_a_post_on_the_old_root(gemini):

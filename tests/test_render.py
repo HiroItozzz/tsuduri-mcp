@@ -95,7 +95,7 @@ def test_skip_note_is_none_when_nothing_was_skipped():
 def test_skip_note_describes_the_skipped_range():
     result = skip_note(first_seq=0, start=3)
 
-    assert result == "index 0〜2 は投稿済みなので index 3 から下書きにした（全部使うなら start=0）"
+    assert result == "index 3 より前に投稿済みの部分があるので index 3 から下書きにした（全部使うなら start=0）"
 
 
 # --- format_cost ---

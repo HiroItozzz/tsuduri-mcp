@@ -248,10 +248,12 @@ def skip_note(first_seq: int, start: int) -> str | None:
     """draft_blog_post が start を省いた既定値（未投稿の始まり）に決めたとき、飛ばした範囲の注記。
 
     投稿済みの部分を飛ばしていなければ（start が線の最初の index のままなら）None。
+    start より前の全部が投稿済みとは限らない（途中だけ投稿していても、最後に投稿した次から始める）ため、
+    範囲を言い切らず「index k より前に投稿済みの部分がある」とだけ伝える。
     """
     if start <= first_seq:
         return None
-    return f"index {first_seq}〜{start - 1} は投稿済みなので index {start} から下書きにした（全部使うなら start=0）"
+    return f"index {start} より前に投稿済みの部分があるので index {start} から下書きにした（全部使うなら start=0）"
 
 
 def render_posts_note(posts: Sequence[PostRecord], line_uuids: set[str]) -> str | None:

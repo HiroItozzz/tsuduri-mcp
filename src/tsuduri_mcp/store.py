@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import sqlite3
 from collections.abc import Iterable, Sequence
@@ -6,10 +7,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
-from . import lines
+from . import lines, log
 from .dates import now_db
 from .models import Conversation, Message
 from .paths import data_dir
+
+logger = logging.getLogger(f"{log.LOGGER_NAME}.store")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS conversations (
@@ -140,13 +143,16 @@ MIGRATIONS: list[tuple[int, str]] = [
     (2, "CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_position ON messages(conversation_uuid, position)"),
     # position はエクスポートの中の位置ではなくなったので、名前を中身に合わせる。索引の定義の列名も SQLite が書き換える
     (3, "ALTER TABLE messages RENAME COLUMN position TO seq"),
+    # list_conversations の post_count が posts を conversation_uuid で絞るため
+    (4, "CREATE INDEX IF NOT EXISTS idx_posts_conversation ON posts(conversation_uuid)"),
 ]
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
     """PRAGMA user_version を見て、今の版より新しい移行だけを順に実行する。SCHEMA を流したあとに呼ぶ。
 
-    新しい DB（版0）でも古い DB でも、同じ道筋で最新の版になる。1回の移行は1トランザクション。
+    新しい DB（版0）でも古い DB でも、同じ道筋で最新の版になる。
+    DDL と PRAGMA では sqlite3 が BEGIN を出さないので、`with conn:` があっても1トランザクションにはなっていない。
     """
     current = conn.execute("PRAGMA user_version").fetchone()[0]
     for version, sql in MIGRATIONS:
@@ -347,6 +353,11 @@ class ConversationStore:
                 # 印の更新も、会話の追加・更新の有無にかかわらず、エクスポートに入っていた会話は必ず調べる
                 result.notes_added += self._update_notes(conv)
             self._recompute_main_line()
+        try:
+            self.conn.execute("PRAGMA optimize")
+        except sqlite3.Error as e:
+            # 取り込みはもうコミット済みなので、失敗扱いにしない
+            logger.warning("PRAGMA optimize に失敗しました（取り込みは完了しています）: %s", e)
         return result
 
     def _upsert_conversation(self, conv: Conversation) -> None:
@@ -526,8 +537,7 @@ class ConversationStore:
         where = _Where()
         if since is not None or until is not None:
             where.add(
-                """EXISTS (SELECT 1 FROM messages m WHERE m.conversation_uuid = c.uuid
-                           AND m.created_at >= ? AND m.created_at < ?)""",
+                "c.uuid IN (SELECT conversation_uuid FROM messages WHERE created_at >= ? AND created_at < ?)",
                 since or "",
                 until or "9999",
             )
