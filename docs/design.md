@@ -223,5 +223,10 @@ ruff（リント・整形）と ty（型チェック）。`uv run ruff check . &
 - DeepSeek / OpenAI（pydantic-ai ならモデル名を足すだけ）
 - 料金の累計を見るツール（`llm_calls` を集計する）。使ってみて必要なら
 - エクスポート JSON の読み込みを pydantic のモデルで検証する（形式が増えたときに、どの項目がおかしいかをわかるようにする）
+- Gemini / ChatGPT の会話も取り込む。今後
+  - 読み込みは `ConversationSource` の実装を足す（`ChatGptExportSource` など）。`sender` の値（ChatGPT は `user`）は Source の中で `human` にそろえる
+  - テーブルは分けず、`conversations` に `source` 列（`claude` / `chatgpt` / `gemini`）を足す案。分けると検索・全文検索の索引・本線・投稿の記録がサービスの数だけ要るため
+  - claude.ai 決め打ちの残り: `importer.py`（形式の切り替えがない）、サーバーの `INSTRUCTIONS` とツールの説明（「claude.ai の過去の会話」）
+  - ChatGPT のエクスポートは `mapping` の親子で木になっていて、今の `parent_uuid` に乗る。`current_node`（画面で表示中の枝）もある。Gemini（Google Takeout）は会話のまとまりが取れるか、実物で確かめる
 - projects テーブル
 - thinking やツールの入出力も検索対象にするか（`raw_content` に残っている）
