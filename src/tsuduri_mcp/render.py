@@ -78,9 +78,16 @@ def render_search(page: Page[MessageHit], offset: int, max_chars: int, keywords:
 def render_conversation_list(page: Page[ConversationInfo], offset: int) -> str:
     lines = [page_header(page.total, offset, len(page.items), "会話")]
     for c in page.items:
+        # メッセージが0件なら last_message_at は会話の updated_at（並べ替え用）なので、最終発言としては見せない
+        last = (
+            f"最終発言 {db_to_local(c.last_message_at)}"
+            if c.message_count
+            else f"最終発言 なし（会話の更新 {db_to_local(c.last_message_at)}）"
+        )
         lines.append(
             f"- {c.uuid} | {conversation_title(c.name, c.first_human_text)} | "
-            f"作成 {db_to_local(c.created_at)} / 最終発言 {db_to_local(c.last_message_at)} | {c.message_count} 件"
+            f"作成 {db_to_local(c.created_at)} / {last} | {c.message_count} 件"
+            + (" | メッセージなし" if not c.message_count else "")
             + (
                 " | 本文なし（エクスポートに本文が含まれていない）"
                 if c.message_count and not c.text_message_count
