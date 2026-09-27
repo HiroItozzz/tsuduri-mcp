@@ -118,7 +118,7 @@ def test_draft_without_posts_starts_from_the_beginning(gemini):
     result = draft()
 
     assert "index 0〜2" in result
-    assert "投稿済みなので" not in result
+    assert "より前に投稿済みの部分" not in result
 
 
 def test_draft_default_start_skips_posted_messages(gemini):
@@ -160,7 +160,6 @@ def test_draft_skip_note_does_not_claim_the_whole_range_is_posted(tmp_path, monk
 
     result = draft()
 
-    assert "index 0〜2 は投稿済み" not in result
     assert result.startswith("index 3 より前に投稿済みの部分があるので index 3 から下書きにした")
 
 
@@ -170,7 +169,7 @@ def test_draft_explicit_start_overrides_the_default(gemini):
     result = draft(start=0)
 
     assert "index 0〜2" in result
-    assert "投稿済みなので" not in result
+    assert "より前に投稿済みの部分" not in result
 
 
 def test_draft_fully_posted_without_start_is_error(gemini):

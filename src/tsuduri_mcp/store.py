@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import sqlite3
 from collections.abc import Iterable, Sequence
@@ -6,10 +7,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
-from . import lines
+from . import lines, log
 from .dates import now_db
 from .models import Conversation, Message
 from .paths import data_dir
+
+logger = logging.getLogger(f"{log.LOGGER_NAME}.store")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS conversations (
@@ -349,7 +352,11 @@ class ConversationStore:
                 # 印の更新も、会話の追加・更新の有無にかかわらず、エクスポートに入っていた会話は必ず調べる
                 result.notes_added += self._update_notes(conv)
             self._recompute_main_line()
-        self.conn.execute("PRAGMA optimize")
+        try:
+            self.conn.execute("PRAGMA optimize")
+        except sqlite3.Error as e:
+            # 取り込みはもうコミット済みなので、失敗扱いにしない
+            logger.warning("PRAGMA optimize に失敗しました（取り込みは完了しています）: %s", e)
         return result
 
     def _upsert_conversation(self, conv: Conversation) -> None:
