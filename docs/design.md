@@ -208,11 +208,27 @@ MCP の prompt（クライアント自身に読ませて書かせるための指
 
 ## DB の版
 
-- `PRAGMA user_version` で版を持ち、`MIGRATIONS`（版番号と SQL の並び）のうち今の版より新しいものだけを順に実行する。1回の移行を1トランザクションにするつもりで `with conn:` で囲んでいるが、Python の sqlite3 は DDL と PRAGMA の前に BEGIN を出さないので、実際にはなっていない（未決定を参照）。SCHEMA は変えず、新しい DB も古い DB も同じ道筋で最新になる
+- `PRAGMA user_version` で版を持ち、`MIGRATIONS`（版番号と、その版で流す SQL のリスト）のうち今の版より新しいものだけを順に実行する。新しい DB も古い DB も同じ道筋で最新になる
+- SCHEMA は原則変えない。例外は版5で消した索引の行で、残すと開くたびに（もうない列 `position` で）作り直そうとしてエラーになるため、SCHEMA からも消した。新しい DB では最初から作らないだけなので、行き着く形は同じ
+- **移行の流し方**（`_migrate`）
+  1. 版を読み、最新なら何もしない（サーバーはツールを呼ぶたびに DB を開くので、ふだんはここで終わる）
+  2. 残りの移行があり、今の版が 1 以上で、ファイルの DB なら、流す前にコピーする（下の「移行の前のコピー」）
+  3. `BEGIN IMMEDIATE` でトランザクションを明示的に始める。Python の sqlite3 は DDL と PRAGMA の前に BEGIN を出さないので、`with conn:` では1トランザクションにならない。IMMEDIATE にするのは、複数のサーバーのプロセスが同時に開いたとき、片方を書き込みのロックで待たせるため（ロック待ちは 30 秒）
+  4. トランザクションの中で版を読み直す（待っているあいだに別のプロセスが移行を済ませていたら、何もしない）
+  5. 残りの版の SQL を順に流し、版ごとに `PRAGMA user_version` を書く。残りの版を全部まとめて1トランザクションにする
+  6. commit する。途中で例外が出たら rollback して、例外をそのまま上げる。実験で、`ALTER TABLE … RENAME COLUMN`・`DROP INDEX`・`PRAGMA user_version` がまとめて巻き戻ることを確かめた（SQLite 3.45.1）
+- **移行の前のコピー**: 元に戻す手順がなく、投稿の記録と要約は DB にしかないため
+  - SQLite のバックアップ機能（`Connection.backup`）でコピーする。WAL のままでも、まだ本体に書き戻していない分まで含めてコピーできる
+  - 置き場所は DB と同じフォルダー。名前は `<DB のファイル名>.v<今の版>-<UTC の日時 YYYYMMDDTHHMMSSZ>.bak`（例: `tsuduri.db.v4-20260927T143000Z.bak`）。DB のパスは `PRAGMA database_list` の main の行から取る（`:memory:` なら空なのでコピーしない）
+  - 同じ名前のファイルがもうあれば作り直さない（同じ秒に2つのプロセスが開いたとき）
+  - 全部残す。消すのは手で。移行はめったにないので増えすぎない
+  - 版0（新しい DB）はコピーしない。中身がないため
+  - コピーしたらログに警告としてパスを出す（`tsuduri-import` は CLI なので stderr に出る。サーバーではログファイルに出る）
 - 版1: `posts.member_uri` を足した
 - 版2: `messages(conversation_uuid, position)` に UNIQUE の索引を足した（実データのコピーで約 1 秒）
 - 版3: `messages.position` を `seq` に改名した。索引の定義の列名は SQLite が書き換える。索引の名前（`idx_messages_position`）は SQLite では変えられないので、そのまま
 - 版4: `posts(conversation_uuid)` に索引を足した（`list_conversations` の `post_count` が posts をここで絞るため）
+- 版5: `idx_messages_conversation(conversation_uuid, seq)` を消した（`DROP INDEX IF EXISTS`）。版2の UNIQUE な `idx_messages_position` と中身が同じだったため。SCHEMA からも行を消した（上の例外）
 
 ## 要約（LLM）
 
@@ -246,10 +262,6 @@ ruff（リント・整形）と ty（型チェック）。`uv run ruff check . &
 
 ## 未決定
 
-- DB の移行のしくみ
-  - 1つの版で SQL を複数流せるようにする（`MIGRATIONS` の SQL をリストにする）。そのうえで、`idx_messages_position` と中身が重なっている `idx_messages_conversation` を消す
-  - 移行を流す前に DB を自動でコピーしておく（元に戻す手順がなく、投稿の記録と要約は DB にしかないため）
-  - 1回の移行を本当に1トランザクションにする（`conn.execute("BEGIN")` を明示する、または `autocommit=False`）。今は SQL と `PRAGMA user_version` の書き込みが別々に確定するので、あいだで落ちると、冪等でない版（版3の RENAME COLUMN）では次に開けなくなるおそれがある
 - Windows の Claude デスクトップで試す（README に設定例あり）
 - 投稿の一覧を出すツールや、記録の取り消し。使ってみて必要なら
 - 枝の一覧を出すツール（各枝の最後の発言の冒頭と日時）。使ってみて必要なら
