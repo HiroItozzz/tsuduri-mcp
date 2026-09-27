@@ -31,6 +31,8 @@ claude.ai の公式エクスポート（設定 → データのエクスポー�
 - 1回の取り込みは1つのトランザクション。途中で失敗したら何も書き込まれない
 - DB は WAL モードで、ロック待ちは 30 秒。取り込み（約 42 秒の1トランザクション）の最中でも、ツールが読めて、投稿の記録も待てるようにするため
 - 取り込みはユーザーが手で行う（エクスポートの zip の URL は1回しか使えず、自動化が難しいため。2026-09-27 に決定）。上の規則で重複しないので、いつ・どの順で取り込んでもよい
+- 取り込みの最後に `PRAGMA optimize` を呼ぶ（統計を更新し、SQLite が索引を選び直せるようにするため。2026-09-27 に追加）
+- `list_conversations` の期間の絞り込みは `c.uuid IN (SELECT conversation_uuid FROM messages WHERE created_at >= ? AND created_at < ?)` にしている。相関サブクエリの `EXISTS` だと実データで初回の読み込みが最大 4 秒かかっていた（2026-09-27 に修正）
 
 ### 本文（`messages.text`）
 
@@ -201,6 +203,7 @@ MCP の prompt（クライアント自身に読ませて書かせるための指
 - 版1: `posts.member_uri` を足した
 - 版2: `messages(conversation_uuid, position)` に UNIQUE の索引を足した（実データのコピーで約 1 秒）
 - 版3: `messages.position` を `seq` に改名した。索引の定義の列名は SQLite が書き換える。索引の名前（`idx_messages_position`）は SQLite では変えられないので、そのまま
+- 版4: `posts(conversation_uuid)` に索引を足した（`list_conversations` の `post_count` が posts をここで絞るため）
 
 ## 要約（LLM）
 
@@ -234,9 +237,6 @@ ruff（リント・整形）と ty（型チェック）。`uv run ruff check . &
 
 ## 未決定
 
-- レビュー（2026-09-27）の残り
-  - 飛ばした範囲の注記（`skip_note`）が、途中だけ投稿したときに範囲を言い切ってしまう。「index k より前に投稿済みの部分があるので k から」のように直す
-  - SQL: 期間で絞った一覧を `c.uuid IN (SELECT conversation_uuid FROM messages WHERE created_at …)` にする（初回が最大 4 秒）、`posts(conversation_uuid)` の索引、取り込みの最後に `PRAGMA optimize`
 - DB の移行のしくみ
   - 1つの版で SQL を複数流せるようにする（`MIGRATIONS` の SQL をリストにする）。そのうえで、`idx_messages_position` と中身が重なっている `idx_messages_conversation` を消す
   - 移行を流す前に DB を自動でコピーしておく（元に戻す手順がなく、投稿の記録と要約は DB にしかないため）

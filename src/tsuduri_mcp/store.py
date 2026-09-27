@@ -140,6 +140,8 @@ MIGRATIONS: list[tuple[int, str]] = [
     (2, "CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_position ON messages(conversation_uuid, position)"),
     # position はエクスポートの中の位置ではなくなったので、名前を中身に合わせる。索引の定義の列名も SQLite が書き換える
     (3, "ALTER TABLE messages RENAME COLUMN position TO seq"),
+    # list_conversations の post_count が posts を conversation_uuid で絞るため
+    (4, "CREATE INDEX IF NOT EXISTS idx_posts_conversation ON posts(conversation_uuid)"),
 ]
 
 
@@ -347,6 +349,7 @@ class ConversationStore:
                 # 印の更新も、会話の追加・更新の有無にかかわらず、エクスポートに入っていた会話は必ず調べる
                 result.notes_added += self._update_notes(conv)
             self._recompute_main_line()
+        self.conn.execute("PRAGMA optimize")
         return result
 
     def _upsert_conversation(self, conv: Conversation) -> None:
@@ -526,8 +529,7 @@ class ConversationStore:
         where = _Where()
         if since is not None or until is not None:
             where.add(
-                """EXISTS (SELECT 1 FROM messages m WHERE m.conversation_uuid = c.uuid
-                           AND m.created_at >= ? AND m.created_at < ?)""",
+                "c.uuid IN (SELECT conversation_uuid FROM messages WHERE created_at >= ? AND created_at < ?)",
                 since or "",
                 until or "9999",
             )

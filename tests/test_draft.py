@@ -134,7 +134,34 @@ def test_draft_default_start_adds_a_note_about_the_skip(gemini):
 
     result = draft()
 
-    assert result.startswith("index 0〜0 は投稿済みなので index 1 から下書きにした（全部使うなら start=0）")
+    assert result.startswith("index 1 より前に投稿済みの部分があるので index 1 から下書きにした")
+    assert "（全部使うなら start=0）" in result
+
+
+def test_draft_skip_note_does_not_claim_the_whole_range_is_posted(tmp_path, monkeypatch):
+    """途中（m1）を投稿せずに m0・m2 だけ投稿した場合、index 0〜2 が投稿済みとは言い切らない。"""
+    msgs = [
+        raw_message("m0", text="最初のテストの質問"),
+        raw_message("m1", sender="assistant", text="最初のテストの答え", parent="m0"),
+        raw_message("m2", text="二つ目のテストの質問", parent="m1"),
+        raw_message("m3", sender="assistant", text="二つ目のテストの答え", parent="m2"),
+    ]
+    src = tmp_path / "conversations.json"
+    src.write_text(json.dumps([raw_conversation("c1", msgs)], ensure_ascii=False), encoding="utf-8")
+    path = tmp_path / "tsuduri.db"
+    conn = connect(path)
+    ConversationStore(conn).import_conversations(ClaudeExportSource(src).load())
+    conn.close()
+    monkeypatch.setenv("TSUDURI_DB", str(path))
+    monkeypatch.setattr(server, "make_model", FakeGemini().model)
+
+    record_post(["m0"])
+    record_post(["m2"])  # m1 は飛ばしたまま、m2 だけ投稿
+
+    result = draft()
+
+    assert "index 0〜2 は投稿済み" not in result
+    assert result.startswith("index 3 より前に投稿済みの部分があるので index 3 から下書きにした")
 
 
 def test_draft_explicit_start_overrides_the_default(gemini):
