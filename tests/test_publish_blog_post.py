@@ -133,7 +133,7 @@ def test_publish_without_confirm_does_not_put(monkeypatch):
     assert "confirm=true" in result
 
 
-def test_publish_default_delay_is_one_minute(monkeypatch):
+def test_publish_default_delay_is_five_minutes(monkeypatch):
     post_id = record_post()
     fake = check_fake(monkeypatch, fetched())
 
@@ -144,7 +144,7 @@ def test_publish_default_delay_is_one_minute(monkeypatch):
     assert len(fake.publish_calls) == 1
     _, _, at = fake.publish_calls[0]
     assert at is not None
-    assert before + timedelta(minutes=1) <= at <= after + timedelta(minutes=1)
+    assert before + timedelta(minutes=5) <= at <= after + timedelta(minutes=5)
 
 
 def test_publish_delay_zero_publishes_immediately(monkeypatch):

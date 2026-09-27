@@ -753,10 +753,10 @@ async def publish_blog_post(
     post_id: Annotated[int, Field(description="check_blog_posts や draft_blog_post に出る post=<id>")],
     delay_minutes: Annotated[
         int, Field(ge=0, description="この分だけ先の時刻を公開日時にして予約する。0 ならすぐ公開")
-    ] = 1,
+    ] = 5,
     confirm: Annotated[bool, Field(description="true のときだけ実際に公開する")] = False,
 ) -> str:
-    """記録した記事をはてなで公開する（既定は1分後の予約。公開までは unpublish_blog_post で取り消せる）。
+    """記録した記事をはてなで公開する（既定は5分後の予約。公開までは unpublish_blog_post で取り消せる）。
 
     はてなから読み出した今の記事（タイトル・本文・カテゴリー）をそのまま使う。手元の下書きは使わない。
     公開は取り消しにくいので、confirm=true を渡すまでは何も変更せず、公開する内容と時刻を見せるだけ。
