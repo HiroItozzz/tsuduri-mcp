@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS messages (
     id                INTEGER PRIMARY KEY,  -- 全文検索の索引が参照する。VACUUM しても変わらない
     uuid              TEXT NOT NULL UNIQUE,
     conversation_uuid TEXT NOT NULL REFERENCES conversations(uuid),
-    position          INTEGER NOT NULL,     -- エクスポート内での並び順（0 始まり）
+    position          INTEGER NOT NULL,     -- 会話の中の番号（0 始まり）。新しいメッセージに順に振り、変えない
     parent_uuid       TEXT,
     sender            TEXT NOT NULL,
     text              TEXT NOT NULL,
@@ -136,6 +136,8 @@ def connect(path: Path | str) -> sqlite3.Connection:
 # (版番号, その版に上げる SQL)。version は 1 から始まる連番で、古い版から順に適用する
 MIGRATIONS: list[tuple[int, str]] = [
     (1, "ALTER TABLE posts ADD COLUMN member_uri TEXT"),  # はてなの記事を指す不変の URI。既存の行は NULL のまま
+    # 会話の中で index が重ならないことを DB でも保証する。重なりがあれば取り込みがエラーで止まる
+    (2, "CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_position ON messages(conversation_uuid, position)"),
 ]
 
 
@@ -354,8 +356,31 @@ class ConversationStore:
         )
 
     def _insert_messages(self, conv: Conversation) -> int:
-        cursor = self.conn.executemany(
-            """INSERT OR IGNORE INTO messages
+        """DB にまだない uuid のメッセージだけを入れる。入れた数を返す。
+
+        position は、その会話の最大の position の次から、エクスポートの並び順に振る。
+        エクスポートの配列の番号をそのまま使うと、メッセージが消えたエクスポートで番号がずれて重なるため。
+        一度振った position は変えない（保存済みの要約に index が書いてあるため）。
+        """
+        existing = {
+            row[0]
+            for row in self.conn.execute(
+                "SELECT uuid FROM messages WHERE uuid IN (SELECT value FROM json_each(?))",
+                (json.dumps([m.uuid for m in conv.messages]),),
+            )
+        }
+        new_messages = []
+        for m in conv.messages:
+            if m.uuid not in existing:
+                existing.add(m.uuid)  # 同じエクスポートの中で uuid が重なっていても、最初の1件だけ入れる
+                new_messages.append(m)
+        if not new_messages:
+            return 0
+        next_position = self.conn.execute(
+            "SELECT coalesce(max(position) + 1, 0) FROM messages WHERE conversation_uuid = ?", (conv.uuid,)
+        ).fetchone()[0]
+        self.conn.executemany(
+            """INSERT INTO messages
                (uuid, conversation_uuid, position, parent_uuid, sender, text, created_at, updated_at,
                 raw_content, attachments, files)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
@@ -363,7 +388,7 @@ class ConversationStore:
                 (
                     m.uuid,
                     conv.uuid,
-                    i,
+                    next_position + i,
                     m.parent_uuid,
                     m.sender,
                     m.text,
@@ -373,11 +398,10 @@ class ConversationStore:
                     json.dumps(m.attachments, ensure_ascii=False),
                     json.dumps(m.files, ensure_ascii=False),
                 )
-                for i, m in enumerate(conv.messages)
+                for i, m in enumerate(new_messages)
             ],
         )
-        # rowcount はトリガー（FTS への書き込み）の分を含まない。total_changes は含むので使わない
-        return cursor.rowcount
+        return len(new_messages)
 
     def _update_notes(self, conv: Conversation) -> int:
         """このエクスポートの会話について、本文・メッセージが消えていないかを調べ、印を付け外しする。
