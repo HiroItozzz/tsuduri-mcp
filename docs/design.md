@@ -212,6 +212,9 @@ ruff（リント・整形）と ty（型チェック）。`uv run ruff check . &
 - レビュー（2026-09-27）の残り
   - 飛ばした範囲の注記（`skip_note`）が、途中だけ投稿したときに範囲を言い切ってしまう。「index k より前に投稿済みの部分があるので k から」のように直す
   - SQL: 期間で絞った一覧を `c.uuid IN (SELECT conversation_uuid FROM messages WHERE created_at …)` にする（初回が最大 4 秒）、`posts(conversation_uuid)` の索引、取り込みの最後に `PRAGMA optimize`
+- DB の移行のしくみ
+  - 1つの版で SQL を複数流せるようにする（`MIGRATIONS` の SQL をリストにする）。そのうえで、`idx_messages_position` と中身が重なっている `idx_messages_conversation` を消す
+  - 移行を流す前に DB を自動でコピーしておく（元に戻す手順がなく、投稿の記録と要約は DB にしかないため）
 - 下書きを公開に変える PUT（`app:draft` を必ず送る。カテゴリーも送り直す）。ほしくなったら
 - Windows の Claude デスクトップで試す（README に設定例あり）
 - 投稿の一覧を出すツールや、記録の取り消し。使ってみて必要なら
