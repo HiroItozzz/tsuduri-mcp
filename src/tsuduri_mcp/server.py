@@ -15,7 +15,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import Field
 from pydantic_ai.models import Model
 
-from . import blog, llm, log, render
+from . import blog, lines, llm, log, render
 from .dates import now_db, since_to_db, until_to_db
 from .store import (
     ConversationInfo,
@@ -533,21 +533,12 @@ def resolve_post_range(
     line = store.get_line(conversation_uuid, through_index)
     if not line.messages:
         raise ValueError("メッセージがありません")
-    positions = {pm.position for pm in line.messages}
-    first, last = line.messages[0].position, line.messages[-1].position
     if start is None:
         unposted = store.unposted_start(line.messages)
         if unposted is None:
             raise ValueError("この枝はすでに全部投稿済みです。start を指定してください")
         start = unposted
-    if end is None:
-        end = last
-    if start not in positions:
-        raise ValueError(f"index={start} はこの枝にありません（{first}〜{last}）")
-    if end not in positions:
-        raise ValueError(f"index={end} はこの枝にありません（{first}〜{last}）")
-    if start > end:
-        raise ValueError(f"start（{start}）が end（{end}）より後ろです")
+    start, end = lines.check_range([pm.position for pm in line.messages], start, end)
     message_uuids = [pm.message.uuid for pm in line.messages if start <= pm.position <= end]
     return ResolvedRange(line, start, end, message_uuids)
 

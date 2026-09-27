@@ -201,7 +201,7 @@ def test_short_keyword_with_like_wildcard_is_literal(store):
     assert store.search_messages(["%"]).total == 0
 
 
-# --- get_line ---
+# --- get_line（線の選び方の細かいテストは test_lines.py） ---
 
 
 @pytest.fixture
@@ -235,19 +235,6 @@ def test_line_defaults_to_newest_branch(branchy):
 
     assert uuids(line) == ["m0", "m1", "m2b", "m3b", "m4b"]
     assert line.leaf_count == 2
-
-
-def test_line_through_old_branch_follows_it_to_the_end(branchy):
-    assert uuids(branchy.get_line("c", through_index=2)) == ["m0", "m1", "m2", "m3"]
-
-
-def test_line_through_common_part_takes_newest_continuation(branchy):
-    assert uuids(branchy.get_line("c", through_index=1)) == ["m0", "m1", "m2b", "m3b", "m4b"]
-
-
-def test_line_unknown_index_is_error(branchy):
-    with pytest.raises(ValueError):
-        branchy.get_line("c", through_index=99)
 
 
 def test_line_of_empty_conversation(store):

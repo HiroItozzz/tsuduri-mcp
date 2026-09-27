@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
+from . import lines
 from .dates import now_db
 from .models import Conversation, Message
 from .paths import data_dir
@@ -267,59 +268,6 @@ class Line:
 
 
 @dataclass
-class _Node:
-    """線を選ぶのに必要な列だけを持つ、軽いメッセージの表現。"""
-
-    uuid: str
-    parent_uuid: str | None
-    created_at: str
-    position: int
-
-
-def _select_line(nodes: Sequence[_Node], through_index: int | None = None) -> list[str]:
-    """through_index のメッセージを通る線を選び、position 順（古い→新しい）の uuid を返す。
-
-    そのメッセージより前は親をたどり、後はいちばん新しい続きをたどる。
-    through_index を省くと、会話でいちばん新しいメッセージを通る線（本線）になる。
-    nodes が空なら空のリストを返す。
-    """
-    if not nodes:
-        return []
-    by_uuid = {n.uuid: n for n in nodes}
-    children: dict[str, list[_Node]] = {}
-    for n in nodes:
-        if n.parent_uuid in by_uuid:
-            children.setdefault(n.parent_uuid, []).append(n)
-
-    def newest(ns: Iterable[_Node]) -> _Node:
-        return max(ns, key=lambda n: (n.created_at, n.position))
-
-    if through_index is None:
-        through = newest(nodes)
-    else:
-        found = [n for n in nodes if n.position == through_index]
-        if not found:
-            raise ValueError(f"index={through_index} のメッセージはありません（0〜{len(nodes) - 1}）")
-        through = found[0]
-
-    # 後ろ: through の子孫のうち、いちばん新しいものを終点にする
-    descendants, stack = [through], [through]
-    while stack:
-        kids = children.get(stack.pop().uuid, [])
-        descendants += kids
-        stack += kids
-    leaf: _Node | None = newest(descendants)
-
-    # 前: 終点から親をたどる
-    line = []
-    while leaf is not None:
-        line.append(leaf)
-        parent = leaf.parent_uuid
-        leaf = by_uuid.get(parent) if parent is not None else None
-    return [n.uuid for n in line[::-1]]
-
-
-@dataclass
 class Page[T]:
     total: int
     items: list[T]
@@ -472,12 +420,12 @@ class ConversationStore:
         rows = self.conn.execute(
             "SELECT conversation_uuid, uuid, parent_uuid, created_at, position FROM messages ORDER BY position"
         ).fetchall()
-        by_conversation: dict[str, list[_Node]] = {}
+        by_conversation: dict[str, list[lines.Node]] = {}
         for row in rows:
             by_conversation.setdefault(row["conversation_uuid"], []).append(
-                _Node(row["uuid"], row["parent_uuid"], row["created_at"], row["position"])
+                lines.Node(row["uuid"], row["parent_uuid"], row["created_at"], row["position"])
             )
-        main_line_uuids = [uuid for nodes in by_conversation.values() for uuid in _select_line(nodes)]
+        main_line_uuids = [uuid for nodes in by_conversation.values() for uuid in lines.select_line(nodes)]
         self.conn.execute("DELETE FROM main_line_messages")
         self.conn.executemany(
             "INSERT INTO main_line_messages (message_uuid) VALUES (?)", [(uuid,) for uuid in main_line_uuids]
@@ -642,12 +590,12 @@ class ConversationStore:
         messages = self.get_messages(conversation_uuid)
         if not messages:
             return Line([], 0)
-        nodes = [_Node(pm.message.uuid, pm.message.parent_uuid, pm.message.created_at, pm.position) for pm in messages]
-        line_uuids = _select_line(nodes, through_index)
+        nodes = [
+            lines.Node(pm.message.uuid, pm.message.parent_uuid, pm.message.created_at, pm.position) for pm in messages
+        ]
         by_uuid = {pm.message.uuid: pm for pm in messages}
-        parents_with_children = {n.parent_uuid for n in nodes if n.parent_uuid in by_uuid}
-        leaf_count = sum(1 for n in nodes if n.uuid not in parents_with_children)
-        return Line([by_uuid[uuid] for uuid in line_uuids], leaf_count)
+        line_uuids = lines.select_line(nodes, through_index)
+        return Line([by_uuid[uuid] for uuid in line_uuids], lines.count_leaves(nodes))
 
     # --- ブログ投稿の記録 ---
 
@@ -750,13 +698,9 @@ class ConversationStore:
         """
         if not line_messages:
             return 0
-        posted = self._posted_uuids([pm.message.uuid for pm in line_messages])
-        if not posted:
-            return line_messages[0].position
-        last_posted_i = max(i for i, pm in enumerate(line_messages) if pm.message.uuid in posted)
-        if last_posted_i == len(line_messages) - 1:
-            return None
-        return line_messages[last_posted_i + 1].position
+        line_uuids = [pm.message.uuid for pm in line_messages]
+        i = lines.first_unposted(line_uuids, self._posted_uuids(line_uuids))
+        return None if i is None else line_messages[i].position
 
     # --- 要約 ---
 

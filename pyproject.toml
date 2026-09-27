@@ -37,7 +37,7 @@ target-version = "py313"
 select = ["E", "F", "I", "B", "UP"]
 
 [tool.ruff.lint.isort]
-known-local-folder = ["claude_export"]
+known-local-folder = ["claude_export", "test_draft", "test_post_blog_article"]
 
 [tool.pytest.ini_options]
 filterwarnings = [

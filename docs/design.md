@@ -59,6 +59,7 @@ claude.ai の公式エクスポート（設定 → データのエクスポー�
 - `models.py`: `Conversation` / `Message`（dataclass）。形式に依存しない
 - `sources.py`: `ConversationSource`（読み込みのインターフェース）と、その実装の `ClaudeExportSource`。claude.ai 形式の知識（キー名、ブロックの種類、ルートの親 uuid）はここに閉じ込める。`conversations.json` と、それを含む zip のどちらも読める
 - `store.py`: `ConversationStore`。SQLite への書き込みと読み出し
+- `lines.py`: 枝（1本の線）の計算。線の選び方・枝の数・未投稿の始まり・範囲の検証。DB を使わないので、枝分かれのテストは DB なしで書ける
 - `dates.py`: ツールの引数（ローカル時刻）と DB（UTC）の日時の変換
 - `render.py`: ツールの戻り値のテキストを組み立てる
 - `server.py`: MCP ツールの定義
@@ -122,7 +123,7 @@ MCP の prompt（クライアント自身に読ませて書かせるための指
 
 - `through_index=k` で「index k を通る線」を選ぶ。k より前は親をたどり、k より後は子孫のうちいちばん新しいメッセージまでたどる。検索で当たった index をそのまま渡せば、その枝が読める
 - 省くと、会話でいちばん新しいメッセージを通る線（本線）。本線に入るメッセージは取り込みのたびに計算して `main_line_messages` に保存する（検索の「本線外」の印と絞り込みに使う）
-- 最初の発言を編集した会話では根が複数ある。線は終点から親をたどるので、そのまま扱える
+- 最初の発言を編集した会話では根が複数ある（実データに 39 件）。線は終点から親をたどるので、そのまま扱える。本線はいちばん新しい根の線だけになり、index は 0 から始まらない。下書き・記録・投稿の既定の範囲も、その線の最初の index から（`tests/test_two_roots.py`）
 - ブログに投稿した範囲の記録も、線の上のメッセージ単位で持つ（下記）。こうすると、枝分かれと「投稿後に続いた会話」を同じ仕組みで扱える
 
 ## ブログ投稿の記録
@@ -204,8 +205,6 @@ ruff（リント・整形）と ty（型チェック）。`uv run ruff check . &
 ## 未決定
 
 - レビュー（2026-09-27）の残り
-  - DB を使わない枝の計算（`_Node`・`_select_line`・枝の数・未投稿の始まりの後半・範囲の検証）を `lines.py` に出す。store.py は SQL だけにし、枝分かれのテストを DB なしで書けるようにする
-  - 根が複数ある会話で、draft・record・post の既定の範囲を確かめるテスト（実データに 39 件ある）
   - 飛ばした範囲の注記（`skip_note`）が、途中だけ投稿したときに範囲を言い切ってしまう。「index k より前に投稿済みの部分があるので k から」のように直す
   - SQL: 期間で絞った一覧を `c.uuid IN (SELECT conversation_uuid FROM messages WHERE created_at …)` にする（初回が最大 4 秒）、`posts(conversation_uuid)` の索引、取り込みの最後に `PRAGMA optimize`
 - 下書きを公開に変える PUT（`app:draft` を必ず送る。カテゴリーも送り直す）。ほしくなったら
