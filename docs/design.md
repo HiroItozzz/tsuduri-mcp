@@ -209,26 +209,28 @@ MCP の prompt（クライアント自身に読ませて書かせるための指
 ## DB の版
 
 - `PRAGMA user_version` で版を持ち、`MIGRATIONS`（版番号と、その版で流す SQL のリスト）のうち今の版より新しいものだけを順に実行する。新しい DB も古い DB も同じ道筋で最新になる
-- SCHEMA は原則変えない。例外は版5で消した索引の行で、残すと開くたびに（もうない列 `position` で）作り直そうとしてエラーになるため、SCHEMA からも消した。新しい DB では最初から作らないだけなので、行き着く形は同じ
+- SCHEMA は変えない。古いコードも開くたびに自分の SCHEMA を流すので、移行で SCHEMA にある索引や列を消すと、古いコードでその DB を開けなくなる（ブランチを切り替えたときや、更新の前から動いているサーバーのプロセス）
+  - 例: `idx_messages_conversation(conversation_uuid, seq)` は版2の UNIQUE な `idx_messages_position` と中身が同じだが、消さない。古いコードの SCHEMA の `CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_uuid, position)` は、索引があるうちは何もしないが、消すともうない列 `position` で作ろうとしてエラーになる（版5で消す案をレビューで取りやめた。2026-09-27）
 - **移行の流し方**（`_migrate`）
   1. 版を読み、最新なら何もしない（サーバーはツールを呼ぶたびに DB を開くので、ふだんはここで終わる）
-  2. 残りの移行があり、今の版が 1 以上で、ファイルの DB なら、流す前にコピーする（下の「移行の前のコピー」）
+  2. 残りの移行があり、今の版が 1 以上で、ファイルの DB なら、流す前にコピーする（下の「移行の前のコピー」）。コピーはロックの外で取る（ロックの中で取ると、コピーのあいだ他のプロセスの書き込みが止まるため）
   3. `BEGIN IMMEDIATE` でトランザクションを明示的に始める。Python の sqlite3 は DDL と PRAGMA の前に BEGIN を出さないので、`with conn:` では1トランザクションにならない。IMMEDIATE にするのは、複数のサーバーのプロセスが同時に開いたとき、片方を書き込みのロックで待たせるため（ロック待ちは 30 秒）
   4. トランザクションの中で版を読み直す（待っているあいだに別のプロセスが移行を済ませていたら、何もしない）
   5. 残りの版の SQL を順に流し、版ごとに `PRAGMA user_version` を書く。残りの版を全部まとめて1トランザクションにする
-  6. commit する。途中で例外が出たら rollback して、例外をそのまま上げる。実験で、`ALTER TABLE … RENAME COLUMN`・`DROP INDEX`・`PRAGMA user_version` がまとめて巻き戻ることを確かめた（SQLite 3.45.1）
+  6. commit する（commit も try の中）。途中で例外が出たら、まだトランザクションが開いていれば rollback して（SQLite がエラーで自分から巻き戻していることがある）、例外をそのまま上げる。実験で、`ALTER TABLE … RENAME COLUMN`・`DROP INDEX`・`PRAGMA user_version` がまとめて巻き戻ることを確かめた（SQLite 3.45.1）
 - **移行の前のコピー**: 元に戻す手順がなく、投稿の記録と要約は DB にしかないため
   - SQLite のバックアップ機能（`Connection.backup`）でコピーする。WAL のままでも、まだ本体に書き戻していない分まで含めてコピーできる
   - 置き場所は DB と同じフォルダー。名前は `<DB のファイル名>.v<今の版>-<UTC の日時 YYYYMMDDTHHMMSSZ>.bak`（例: `tsuduri.db.v4-20260927T143000Z.bak`）。DB のパスは `PRAGMA database_list` の main の行から取る（`:memory:` なら空なのでコピーしない）
-  - 同じ名前のファイルがもうあれば作り直さない（同じ秒に2つのプロセスが開いたとき）
-  - 全部残す。消すのは手で。移行はめったにないので増えすぎない
+  - 同じ版のコピー（`<DB のファイル名>.v<今の版>-*.bak`）がもうあれば作らない。移行が失敗し続けたり、ロック待ちで諦めたりしても、ツールを呼ぶたびにコピーが増えないようにするため
+  - コピーに失敗したら（ディスクが満杯など）、途中までのファイルを消し、「移行の前のコピーに失敗した」とパスつきでログに出してから、例外をそのまま上げる。移行は流さない
+  - 版ごとに1つ残る。消すのは手で
+  - ロックの外で取るので、2つのプロセスがほぼ同時に開くと、まれに同じ版のコピーが2つできたり、先に移行が済んで中身が新しい版になったりする。どちらも害はないので受け入れる
   - 版0（新しい DB）はコピーしない。中身がないため
   - コピーしたらログに警告としてパスを出す（`tsuduri-import` は CLI なので stderr に出る。サーバーではログファイルに出る）
 - 版1: `posts.member_uri` を足した
 - 版2: `messages(conversation_uuid, position)` に UNIQUE の索引を足した（実データのコピーで約 1 秒）
 - 版3: `messages.position` を `seq` に改名した。索引の定義の列名は SQLite が書き換える。索引の名前（`idx_messages_position`）は SQLite では変えられないので、そのまま
 - 版4: `posts(conversation_uuid)` に索引を足した（`list_conversations` の `post_count` が posts をここで絞るため）
-- 版5: `idx_messages_conversation(conversation_uuid, seq)` を消した（`DROP INDEX IF EXISTS`）。版2の UNIQUE な `idx_messages_position` と中身が同じだったため。SCHEMA からも行を消した（上の例外）
 
 ## 要約（LLM）
 
