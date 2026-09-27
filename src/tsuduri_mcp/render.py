@@ -264,7 +264,7 @@ def render_posts_note(posts: Sequence[PostRecord], line_uuids: set[str]) -> str 
     lines = ["この会話には投稿の記録があります:"]
     for p in posts:
         branch = "この枝" if p.message_uuids <= line_uuids else "別の枝"
-        lines.append(f"- 「{p.title}」 {p.service} index {p.min_seq}〜{p.max_seq}（{branch}） {p.url}")
+        lines.append(f"- 「{p.title}」 {p.service} index {p.min_seq}〜{p.max_seq}（{branch}） post={p.id} {p.url}")
     return "\n".join(lines)
 
 
@@ -283,24 +283,25 @@ def render_duplicate_note(overlaps: Sequence[PostOverlap]) -> str | None:
 def render_post_without_member_uri(p: PostRecord) -> str:
     """record_blog_post で入れた記録（member_uri がない）は、はてな側の今の状態を確かめられない。"""
     return (
-        f"- 「{p.title}」 {p.service} index {p.min_seq}〜{p.max_seq} {p.url}\n  メンバー URI がないので確かめられない"
+        f"- 「{p.title}」 {p.service} index {p.min_seq}〜{p.max_seq} post={p.id} {p.url}\n"
+        "  メンバー URI がないので確かめられない"
     )
 
 
 def render_post_deleted(p: PostRecord) -> str:
     """はてなに GET して見つからなかった（削除されたらしい）ときの表示。記録は消さない。"""
     return (
-        f"- 「{p.title}」 {p.service} index {p.min_seq}〜{p.max_seq} {p.url}\n"
+        f"- 「{p.title}」 {p.service} index {p.min_seq}〜{p.max_seq} post={p.id} {p.url}\n"
         "  はてな側で削除されたようです。記録は残したまま"
     )
 
 
 def render_post_status(p: PostRecord, fetched: FetchedArticle, url_updated: bool, include_content: bool) -> str:
-    """はてなから読み出した記事の今の状態。"""
+    """はてなから読み出した記事の今の状態。予約中なら「予約（公開 <時刻>）」と表示する。"""
+    status = f"予約（公開 {fetched.updated}）" if fetched.scheduled else ("下書き" if fetched.is_draft else "公開")
     lines = [
-        f"- 「{fetched.title}」 {p.service} index {p.min_seq}〜{p.max_seq}",
-        f"  {'下書き' if fetched.is_draft else '公開'} / URL: {fetched.url}"
-        + ("（記録と違ったので更新しました）" if url_updated else ""),
+        f"- 「{fetched.title}」 {p.service} index {p.min_seq}〜{p.max_seq} post={p.id}",
+        f"  {status} / URL: {fetched.url}" + ("（記録と違ったので更新しました）" if url_updated else ""),
         f"  編集: {fetched.edit_url}",
         f"  カテゴリー: {', '.join(fetched.categories) if fetched.categories else 'なし'}",
         f"  本文 {len(fetched.content)} 文字 / updated {fetched.updated} / edited {fetched.edited}",

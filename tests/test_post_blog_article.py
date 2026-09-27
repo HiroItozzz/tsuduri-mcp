@@ -36,6 +36,12 @@ class FakePoster(blog.BlogPoster):
     async def get(self, member_uri: str) -> blog.FetchedArticle | None:
         raise NotImplementedError  # このテストファイルでは使わない
 
+    async def publish(self, member_uri: str, article: blog.BlogArticle, *, at) -> blog.PostResult:
+        raise NotImplementedError  # このテストファイルでは使わない
+
+    async def unpublish(self, member_uri: str, article: blog.BlogArticle) -> blog.PostResult:
+        raise NotImplementedError  # このテストファイルでは使わない
+
 
 @pytest.fixture(autouse=True)
 def db(tmp_path, monkeypatch):

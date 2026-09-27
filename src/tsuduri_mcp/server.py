@@ -7,6 +7,7 @@ import time
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -21,6 +22,7 @@ from .store import (
     ConversationInfo,
     ConversationStore,
     Line,
+    PostRecord,
     StoredMessage,
     Summary,
     SummaryKey,
@@ -45,6 +47,8 @@ claude.ai の過去の会話履歴を検索・閲覧するサーバー。
 - はてなブログへ投稿するときは post_blog_article を使う（既定は下書き投稿）。投稿した範囲は自動で記録される
 - post_blog_article を使わずに投稿したときは、record_blog_post で範囲を記録する。次の draft_blog_post は続きから作れる
 - 記録した投稿が今どうなっているか（下書きのままか、削除されていないか）は check_blog_posts で確かめる
+- 記録した記事を公開する・下書きに戻すのは publish_blog_post / unpublish_blog_post
+  （check_blog_posts や draft_blog_post に出る post=<id> で指す。confirm=true を渡すまで実行しない）
 """
 
 MAX_LIMIT = 100
@@ -71,7 +75,18 @@ mcp = MCPServer("tsuduri", instructions=INSTRUCTIONS)
 CAUGHT_EXCEPTIONS = (ValueError, FileNotFoundError, RuntimeError)
 
 # ログに残す引数だけを選ぶ。会話の本文・検索キーワード・認証情報などは載せない
-LOGGED_TOOL_ARGS = ("conversation_uuid", "through_index", "start", "end", "service", "publish", "refresh")
+LOGGED_TOOL_ARGS = (
+    "conversation_uuid",
+    "through_index",
+    "start",
+    "end",
+    "service",
+    "publish",
+    "refresh",
+    "post_id",
+    "delay_minutes",
+    "confirm",
+)
 
 
 def _describe_args(fn: Callable[..., Any], args: tuple[Any, ...], kwargs: dict[str, Any]) -> str:
@@ -150,6 +165,14 @@ def find_conversation(store: ConversationStore, conversation_uuid: str) -> Conve
     if not found:
         raise ValueError(f"会話が見つかりません: {conversation_uuid}")
     return found[0]
+
+
+def find_post(store: ConversationStore, conversation_uuid: str, post_id: int) -> PostRecord:
+    """check_blog_posts や draft_blog_post に出る post=<id> から、記録を探す。"""
+    for p in store.list_posts(conversation_uuid):
+        if p.id == post_id:
+            return p
+    raise ValueError(f"post={post_id} の投稿の記録が見つかりません")
 
 
 def _check_keyword_lengths(words: Sequence[str]) -> None:
@@ -694,6 +717,127 @@ async def check_blog_posts(
     title = render.conversation_title(info.name, info.first_human_text)
     header = f"「{title}」 conversation={conversation_uuid} の投稿 {len(posts)} 件"
     return header + "\n\n" + "\n\n".join(blocks)
+
+
+async def _fetch_post_for_publishing(
+    conversation_uuid: str, post_id: int
+) -> tuple[ConversationInfo, PostRecord, blog.FetchedArticle]:
+    """publish_blog_post / unpublish_blog_post 共通の下ごしらえ。
+
+    記録を探し、メンバー URI があることを確かめ、はてなから今の記事を読み出す。
+    """
+    with open_store() as store:
+        info = find_conversation(store, conversation_uuid)
+        record = find_post(store, conversation_uuid, post_id)
+    if record.member_uri is None:
+        raise ValueError(f"post={post_id} は record_blog_post で記録したもの（メンバー URI がない）なので扱えません")
+    poster = make_poster(record.service)
+    fetched = await poster.get(record.member_uri)
+    if fetched is None:
+        raise ValueError(f"post={post_id} の記事がはてなに見つかりません（削除されたようです）")
+    return info, record, fetched
+
+
+def _post_header(info: ConversationInfo, conversation_uuid: str, post_id: int) -> str:
+    title = render.conversation_title(info.name, info.first_human_text)
+    return f"「{title}」 conversation={conversation_uuid} の post={post_id}"
+
+
+@mcp_tool
+async def publish_blog_post(
+    conversation_uuid: str,
+    post_id: Annotated[int, Field(description="check_blog_posts や draft_blog_post に出る post=<id>")],
+    delay_minutes: Annotated[
+        int, Field(ge=0, description="この分だけ先の時刻を公開日時にして予約する。0 ならすぐ公開")
+    ] = 1,
+    confirm: Annotated[bool, Field(description="true のときだけ実際に公開する")] = False,
+) -> str:
+    """記録した記事をはてなで公開する（既定は1分後の予約。公開までは unpublish_blog_post で取り消せる）。
+
+    はてなから読み出した今の記事（タイトル・本文・カテゴリー）をそのまま使う。手元の下書きは使わない。
+    公開は取り消しにくいので、confirm=true を渡すまでは何も変更せず、公開する内容と時刻を見せるだけ。
+    すでに公開・予約中なら何もしない。
+    """
+    info, record, fetched = await _fetch_post_for_publishing(conversation_uuid, post_id)
+    header = _post_header(info, conversation_uuid, post_id)
+    detail = (
+        f"{header}\n「{fetched.title}」"
+        f" カテゴリー: {', '.join(fetched.categories) if fetched.categories else 'なし'}"
+        f" / 本文 {len(fetched.content)} 文字"
+    )
+
+    if not fetched.is_draft:
+        return f"{detail}\nすでに公開されています（{fetched.url}）。何もしませんでした"
+    if fetched.scheduled:
+        return f"{detail}\nすでに予約されています（公開 {fetched.updated}）。何もしませんでした"
+
+    # 秒までにする（はてなで確かめたのは秒までの時刻）
+    now = datetime.now(blog.JST).replace(microsecond=0)
+    at = None if delay_minutes == 0 else now + timedelta(minutes=delay_minutes)
+    if not confirm:
+        when = "すぐ公開します" if at is None else f"{at.isoformat()} に公開するよう予約します"
+        return f"{detail}\n{when}。この内容で実行するには confirm=true で呼んでください"
+
+    article = blog.BlogArticle(title=fetched.title, content=fetched.content, categories=fetched.categories)
+    assert record.member_uri is not None  # _fetch_post_for_publishing で確かめ済み
+    poster = make_poster(record.service)
+    result = await poster.publish(record.member_uri, article, at=at)
+    logger.info(
+        "publish_blog_post service=%s url=%s edit_url=%s is_draft=%s conversation=%s post=%d",
+        record.service,
+        result.url,
+        result.edit_url,
+        result.is_draft,
+        conversation_uuid,
+        post_id,
+    )
+    with open_store() as store:
+        store.update_post_url(post_id, result.url)
+    if at is None:
+        return f"{detail}\n公開しました: {result.url}"
+    return (
+        f"{detail}\n{at.isoformat()} に公開するよう予約しました。それまでは unpublish_blog_post で取り消せます\n"
+        f"編集: {result.edit_url}\n"
+        "（予約した記事の URL は公開の時刻に変わります。公開後に check_blog_posts で記録が直ります）"
+    )
+
+
+@mcp_tool
+async def unpublish_blog_post(
+    conversation_uuid: str,
+    post_id: Annotated[int, Field(description="check_blog_posts や draft_blog_post に出る post=<id>")],
+    confirm: Annotated[bool, Field(description="true のときだけ実際に下書きに戻す")] = False,
+) -> str:
+    """記録した記事をはてなで下書きに戻す（予約中なら予約を取り消す）。URL は変えない。
+
+    はてなから読み出した今の記事（タイトル・本文・カテゴリー）をそのまま使う。手元の下書きは使わない。
+    confirm=true を渡すまでは何も変更せず、今の状態を見せるだけ。すでに下書き（予約なし）なら何もしない。
+    """
+    info, record, fetched = await _fetch_post_for_publishing(conversation_uuid, post_id)
+    header = _post_header(info, conversation_uuid, post_id)
+
+    if fetched.is_draft and not fetched.scheduled:
+        return f"{header}\nすでに下書きです。何もしませんでした"
+
+    state = f"予約中（公開 {fetched.updated}）" if fetched.scheduled else "公開中"
+    if not confirm:
+        return f"{header}\n今は{state}です。下書きに戻すには confirm=true で呼んでください"
+
+    article = blog.BlogArticle(title=fetched.title, content=fetched.content, categories=fetched.categories)
+    assert record.member_uri is not None  # _fetch_post_for_publishing で確かめ済み
+    poster = make_poster(record.service)
+    result = await poster.unpublish(record.member_uri, article)
+    logger.info(
+        "unpublish_blog_post service=%s url=%s edit_url=%s conversation=%s post=%d",
+        record.service,
+        result.url,
+        result.edit_url,
+        conversation_uuid,
+        post_id,
+    )
+    with open_store() as store:
+        store.update_post_url(post_id, result.url)
+    return f"{header}\n下書きに戻しました: {result.url}"
 
 
 # --- MCP クライアント（Claude など）が自分で読んで書くための prompt ---

@@ -56,6 +56,8 @@ Claude デスクトップ（`claude_desktop_config.json`）:
 | `post_blog_article` | はてなブログへ投稿する（既定は下書き）。投稿した範囲を自動で記録する |
 | `record_blog_post` | `post_blog_article` を使わずに投稿したとき、範囲を記録する（投稿自体はしない） |
 | `check_blog_posts` | 記録した投稿の、はてな側での今の状態を確かめる |
+| `publish_blog_post` | 記録した記事を公開する（既定は1分後の予約。`confirm=true` で実行） |
+| `unpublish_blog_post` | 記録した記事を下書きに戻す（予約中なら予約を取り消す。`confirm=true` で実行） |
 
 prompt として `summarize_with_claude` と `draft_blog_with_claude` もある（クライアント自身が要約・下書きをする）。
 

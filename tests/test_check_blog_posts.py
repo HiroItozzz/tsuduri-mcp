@@ -28,6 +28,12 @@ class FakePoster(blog.BlogPoster):
         self.requested_uris.append(member_uri)
         return self.article
 
+    async def publish(self, member_uri: str, article: blog.BlogArticle, *, at) -> blog.PostResult:
+        raise NotImplementedError  # このテストファイルでは使わない
+
+    async def unpublish(self, member_uri: str, article: blog.BlogArticle) -> blog.PostResult:
+        raise NotImplementedError  # このテストファイルでは使わない
+
 
 def fetched(**overrides) -> blog.FetchedArticle:
     values = {
@@ -39,6 +45,7 @@ def fetched(**overrides) -> blog.FetchedArticle:
         "edit_url": "https://blog.hatena.ne.jp/user/blog.example.com/edit?entry=1",
         "updated": "2026-09-27T10:00:00+09:00",
         "edited": "2026-09-27T10:00:00+09:00",
+        "scheduled": False,
     }
     values.update(overrides)
     return blog.FetchedArticle(**values)
@@ -144,6 +151,24 @@ def test_missing_member_uri_is_reported(monkeypatch):
 
     assert fake.requested_uris == []  # 確かめに行かない
     assert "メンバー URI がないので確かめられない" in result
+
+
+def test_post_id_is_shown(monkeypatch):
+    record_post()
+    post_id = list_posts()[0].id
+
+    result, _ = check(monkeypatch, fetched())
+
+    assert f"post={post_id}" in result
+
+
+def test_scheduled_article_is_shown_as_reserved(monkeypatch):
+    record_post()
+
+    result, _ = check(monkeypatch, fetched(is_draft=True, scheduled=True, updated="2026-12-31T09:00:00+09:00"))
+
+    assert "予約（公開 2026-12-31T09:00:00+09:00）" in result
+    assert "下書き" not in result
 
 
 def test_content_is_shown_only_when_include_content_is_true(monkeypatch):

@@ -206,7 +206,7 @@ def test_draft_lists_previous_posts_in_this_conversation(gemini):
     result = draft(start=0)
 
     assert "この会話には投稿の記録があります:" in result
-    assert "「前の記事」 hatena index 0〜0（この枝） https://example.com/first" in result
+    assert "「前の記事」 hatena index 0〜0（この枝） post=1 https://example.com/first" in result
 
 
 def test_draft_no_posts_note_without_any_post(gemini):

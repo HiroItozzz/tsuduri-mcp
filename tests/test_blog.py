@@ -3,15 +3,20 @@
 import asyncio
 import re
 import xml.etree.ElementTree as ET
+from datetime import datetime
 from urllib.parse import unquote
 
 import httpx2
 import pytest
 
-from tsuduri_mcp.blog import BlogArticle, HatenaPoster
+from tsuduri_mcp.blog import JST, BlogArticle, HatenaPoster
 
 ENTRY_URL = "https://blog.hatena.ne.jp/user/blog.example.com/atom/entry"
-NS = {"atom": "http://www.w3.org/2005/Atom", "app": "http://www.w3.org/2007/app"}
+NS = {
+    "atom": "http://www.w3.org/2005/Atom",
+    "app": "http://www.w3.org/2007/app",
+    "hatenablog": "http://www.hatena.ne.jp/info/xmlns#hatenablog",
+}
 
 RESPONSE_XML = """<?xml version="1.0" encoding="utf-8"?>
 <entry xmlns="http://www.w3.org/2005/Atom" xmlns:app="http://www.w3.org/2007/app">
@@ -54,7 +59,7 @@ def parse_entry(xml_str: str) -> ET.Element:
 
 
 def test_request_xml_contains_article():
-    root = parse_entry(make_poster()._build_entry(article(), draft=True))
+    root = parse_entry(make_poster()._build_entry(article(), draft=True, updated=datetime.now(JST)))
 
     title = root.find("atom:title", NS)
     assert title is not None
@@ -66,7 +71,7 @@ def test_request_xml_contains_article():
 
 
 def test_request_xml_contains_categories():
-    root = parse_entry(make_poster()._build_entry(article(), draft=True))
+    root = parse_entry(make_poster()._build_entry(article(), draft=True, updated=datetime.now(JST)))
 
     terms = [c.get("term") for c in root.findall("atom:category", NS)]
     assert terms == ["Python", "学習"]
@@ -74,7 +79,7 @@ def test_request_xml_contains_categories():
 
 @pytest.mark.parametrize(("draft", "expected"), [(True, "yes"), (False, "no")])
 def test_request_xml_draft_flag(draft, expected):
-    root = parse_entry(make_poster()._build_entry(article(), draft=draft))
+    root = parse_entry(make_poster()._build_entry(article(), draft=draft, updated=datetime.now(JST)))
 
     draft_elem = root.find("app:control/app:draft", NS)
     assert draft_elem is not None
@@ -82,11 +87,64 @@ def test_request_xml_draft_flag(draft, expected):
 
 
 def test_updated_is_now_in_jst():
-    root = parse_entry(make_poster()._build_entry(article(), draft=True))
+    root = parse_entry(make_poster()._build_entry(article(), draft=True, updated=datetime.now(JST)))
 
     updated = root.find("atom:updated", NS)
     assert updated is not None and updated.text is not None
     assert updated.text.endswith("+09:00")
+
+
+def test_updated_is_omitted_when_none():
+    """下書きに戻すときは updated を送らない（予約や公開の時刻を変えないため）。"""
+    root = parse_entry(make_poster()._build_entry(article(), draft=True, updated=None))
+
+    assert root.find("atom:updated", NS) is None
+
+
+def test_updated_uses_given_time():
+    """公開の予約では、指定した未来の時刻をそのまま使う。"""
+    at = datetime(2026, 12, 31, 9, 0, 0, tzinfo=JST)
+    root = parse_entry(make_poster()._build_entry(article(), draft=True, updated=at))
+
+    updated = root.find("atom:updated", NS)
+    assert updated is not None
+    assert updated.text == at.isoformat()
+
+
+@pytest.mark.parametrize(("scheduled", "expected"), [(True, "yes"), (False, "no")])
+def test_request_xml_scheduled_flag(scheduled, expected):
+    root = parse_entry(
+        make_poster()._build_entry(article(), draft=True, updated=datetime.now(JST), scheduled=scheduled)
+    )
+
+    scheduled_elem = root.find("app:control/hatenablog:scheduled", NS)
+    assert scheduled_elem is not None
+    assert scheduled_elem.text == expected
+
+
+def test_scheduled_element_is_omitted_when_none():
+    """新規投稿（post）では hatenablog:scheduled 要素自体を送らない。"""
+    root = parse_entry(make_poster()._build_entry(article(), draft=True, updated=datetime.now(JST)))
+
+    assert root.find("app:control/hatenablog:scheduled", NS) is None
+
+
+def test_post_does_not_send_scheduled_element():
+    requests: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        requests.append(request)
+        return httpx2.Response(201, text=RESPONSE_XML)
+
+    async def run():
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
+            await make_poster(client=client).post(article(), draft=True)
+
+    asyncio.run(run())
+
+    sent = parse_entry(requests[0].content.decode())
+    assert sent.find("app:control/hatenablog:scheduled", NS) is None
+    assert sent.find("atom:updated", NS) is not None
 
 
 # --- レスポンス解析 ---
@@ -237,6 +295,39 @@ def test_get_returns_fetched_article():
     assert result.edit_url == "https://blog.hatena.ne.jp/user/blog.example.com/edit?entry=2500000000"
     assert result.updated == "2025-11-20T10:30:00+09:00"
     assert result.edited == "2025-11-20T10:30:00+09:00"
+    assert result.scheduled is False
+
+
+SCHEDULED_FETCHED_XML = """<?xml version="1.0" encoding="utf-8"?>
+<entry xmlns="http://www.w3.org/2005/Atom" xmlns:app="http://www.w3.org/2007/app"
+       xmlns:hatenablog="http://www.hatena.ne.jp/info/xmlns#hatenablog">
+  <link rel="edit" href="https://blog.hatena.ne.jp/user/blog.example.com/atom/entry/2500000000"/>
+  <link rel="alternate" type="text/html" href="https://blog.example.com/entry/2026/12/31/090000"/>
+  <title>記事タイトル</title>
+  <updated>2026-12-31T09:00:00+09:00</updated>
+  <content type="text/x-markdown">本文</content>
+  <app:control>
+    <app:draft>yes</app:draft>
+    <hatenablog:scheduled>yes</hatenablog:scheduled>
+  </app:control>
+</entry>
+"""
+
+
+def test_get_returns_scheduled_true_when_reserved():
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, text=SCHEDULED_FETCHED_XML)
+
+    async def run():
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
+            return await make_poster(client=client).get(MEMBER_URI)
+
+    result = asyncio.run(run())
+
+    assert result is not None
+    assert result.is_draft is True
+    assert result.scheduled is True
+    assert result.updated == "2026-12-31T09:00:00+09:00"
 
 
 def test_get_returns_none_when_not_found():
@@ -283,6 +374,131 @@ def test_get_wraps_malformed_response_xml():
             await make_poster(client=client).get(MEMBER_URI)
 
     with pytest.raises(RuntimeError, match="解釈できません"):
+        asyncio.run(run())
+
+
+# --- 公開・予約・下書きに戻す（PUT, MockTransport） ---
+
+PUT_RESPONSE_XML = """<?xml version="1.0" encoding="utf-8"?>
+<entry xmlns="http://www.w3.org/2005/Atom" xmlns:app="http://www.w3.org/2007/app">
+  <link rel="edit" href="https://blog.hatena.ne.jp/user/blog.example.com/atom/entry/2500000000"/>
+  <link rel="alternate" type="text/html" href="https://blog.example.com/entry/2026/12/31/090000"/>
+  <title>記事タイトル</title>
+  <updated>2026-12-31T09:00:00+09:00</updated>
+  <content type="text/x-markdown">本文</content>
+  <app:control>
+    <app:draft>yes</app:draft>
+  </app:control>
+</entry>
+"""
+
+
+def test_publish_immediately_sends_draft_no_and_now_updated():
+    requests: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        requests.append(request)
+        return httpx2.Response(200, text=PUT_RESPONSE_XML)
+
+    async def run():
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
+            return await make_poster(client=client).publish(MEMBER_URI, article(), at=None)
+
+    result = asyncio.run(run())
+
+    assert len(requests) == 1
+    request = requests[0]
+    assert request.method == "PUT"
+    assert str(request.url) == MEMBER_URI
+    sent = parse_entry(request.content.decode())
+    draft_elem = sent.find("app:control/app:draft", NS)
+    assert draft_elem is not None and draft_elem.text == "no"
+    scheduled_elem = sent.find("app:control/hatenablog:scheduled", NS)
+    assert scheduled_elem is not None and scheduled_elem.text == "no"
+    updated = sent.find("atom:updated", NS)
+    assert updated is not None and updated.text is not None and updated.text.endswith("+09:00")
+    assert result.url == "https://blog.example.com/entry/2026/12/31/090000"
+
+
+def test_publish_with_at_sends_draft_yes_scheduled_yes_and_given_updated():
+    requests: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        requests.append(request)
+        return httpx2.Response(200, text=PUT_RESPONSE_XML)
+
+    at = datetime(2026, 12, 31, 9, 0, 0, tzinfo=JST)
+
+    async def run():
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
+            await make_poster(client=client).publish(MEMBER_URI, article(), at=at)
+
+    asyncio.run(run())
+
+    sent = parse_entry(requests[0].content.decode())
+    draft_elem = sent.find("app:control/app:draft", NS)
+    assert draft_elem is not None and draft_elem.text == "yes"
+    scheduled_elem = sent.find("app:control/hatenablog:scheduled", NS)
+    assert scheduled_elem is not None and scheduled_elem.text == "yes"
+    updated = sent.find("atom:updated", NS)
+    assert updated is not None and updated.text == at.isoformat()
+
+
+def test_unpublish_sends_draft_yes_scheduled_no_and_no_updated():
+    requests: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        requests.append(request)
+        return httpx2.Response(200, text=PUT_RESPONSE_XML)
+
+    async def run():
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
+            return await make_poster(client=client).unpublish(MEMBER_URI, article())
+
+    result = asyncio.run(run())
+
+    sent = parse_entry(requests[0].content.decode())
+    draft_elem = sent.find("app:control/app:draft", NS)
+    assert draft_elem is not None and draft_elem.text == "yes"
+    scheduled_elem = sent.find("app:control/hatenablog:scheduled", NS)
+    assert scheduled_elem is not None and scheduled_elem.text == "no"
+    assert sent.find("atom:updated", NS) is None
+    assert result.url == "https://blog.example.com/entry/2026/12/31/090000"
+
+
+def test_publish_raises_runtime_error_when_not_200():
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(400, text="Bad Request: something is wrong")
+
+    async def run():
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
+            await make_poster(client=client).publish(MEMBER_URI, article(), at=None)
+
+    with pytest.raises(RuntimeError, match="400"):
+        asyncio.run(run())
+
+
+def test_unpublish_wraps_transport_error_with_a_hint_to_check_hatena():
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        raise httpx2.ConnectError("接続に失敗しました")
+
+    async def run():
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
+            await make_poster(client=client).unpublish(MEMBER_URI, article())
+
+    with pytest.raises(RuntimeError, match="下書き一覧を確かめてから再実行"):
+        asyncio.run(run())
+
+
+def test_publish_wraps_malformed_response_xml():
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, text="これは XML ではありません")
+
+    async def run():
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
+            await make_poster(client=client).publish(MEMBER_URI, article(), at=None)
+
+    with pytest.raises(RuntimeError, match="解釈できませんでした"):
         asyncio.run(run())
 
 

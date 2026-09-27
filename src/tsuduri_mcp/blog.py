@@ -45,6 +45,7 @@ class FetchedArticle:
     edit_url: str
     updated: str
     edited: str
+    scheduled: bool  # 予約中（下書きのまま、指定の時刻に自動で公開される）かどうか
 
 
 class BlogPoster(ABC):
@@ -56,6 +57,19 @@ class BlogPoster(ABC):
     @abstractmethod
     async def get(self, member_uri: str) -> FetchedArticle | None:
         """member_uri の記事の今の状態を読み出す。見つからなければ None。"""
+        ...
+
+    @abstractmethod
+    async def publish(self, member_uri: str, article: BlogArticle, *, at: datetime | None) -> PostResult:
+        """member_uri の記事を公開する。at を渡すとその時刻に予約し、None ならすぐ公開する。
+
+        予約の有無はサービスごとに違うので、インターフェースは「いつ公開するか」だけを受け取る。
+        """
+        ...
+
+    @abstractmethod
+    async def unpublish(self, member_uri: str, article: BlogArticle) -> PostResult:
+        """member_uri の記事を下書きに戻す（予約中なら予約も取り消す）。URL は変えない。"""
         ...
 
 
@@ -76,7 +90,11 @@ class HatenaPoster(BlogPoster):
 
     service = "hatena"
 
-    NS = {"atom": "http://www.w3.org/2005/Atom", "app": "http://www.w3.org/2007/app"}
+    NS = {
+        "atom": "http://www.w3.org/2005/Atom",
+        "app": "http://www.w3.org/2007/app",
+        "hatenablog": "http://www.hatena.ne.jp/info/xmlns#hatenablog",
+    }
 
     def __init__(
         self,
@@ -116,7 +134,7 @@ class HatenaPoster(BlogPoster):
         return cls(entry_url, consumer_key, consumer_secret, access_token, access_token_secret)
 
     async def post(self, article: BlogArticle, *, draft: bool) -> PostResult:
-        xml_entry = self._build_entry(article, draft=draft)
+        xml_entry = self._build_entry(article, draft=draft, updated=datetime.now(JST))
         auth = OAuth1Auth(
             client_id=self.consumer_key,
             client_secret=self.consumer_secret,
@@ -146,27 +164,40 @@ class HatenaPoster(BlogPoster):
                 f"はてなブログの応答を解釈できませんでした（{type(e).__name__}）。{UNKNOWN_RESULT_HINT}"
             ) from e
 
-    def _build_entry(self, article: BlogArticle, *, draft: bool) -> str:
-        """はてなブログ投稿リクエストの Atom XML を組み立てる。"""
+    def _build_entry(
+        self, article: BlogArticle, *, draft: bool, updated: datetime | None, scheduled: bool | None = None
+    ) -> str:
+        """はてなブログ投稿リクエストの Atom XML を組み立てる。
+
+        updated は None なら要素ごと省く（下書きに戻すときは、予約や公開の時刻を変えないため）。
+        scheduled は None なら hatenablog:scheduled 要素を送らない（新規投稿のとき）。
+        yes/no を明示すると、予約する・予約を取り消す。
+        """
         root = ET.Element(
             "entry",
             attrib={
                 "xmlns": "http://www.w3.org/2005/Atom",
                 "xmlns:app": "http://www.w3.org/2007/app",
+                "xmlns:hatenablog": "http://www.hatena.ne.jp/info/xmlns#hatenablog",
             },
         )
         title_elem = ET.SubElement(root, "title")
-        updated_elem = ET.SubElement(root, "updated")
+        updated_elem = ET.SubElement(root, "updated") if updated is not None else None
         content_elem = ET.SubElement(root, "content", attrib={"type": "text/x-markdown"})
         control = ET.SubElement(root, "app:control")
         draft_elem = ET.SubElement(control, "app:draft")
+        scheduled_elem = ET.SubElement(control, "hatenablog:scheduled") if scheduled is not None else None
         for category in article.categories:
             ET.SubElement(root, "category", attrib={"term": category})
 
         title_elem.text = article.title
-        updated_elem.text = datetime.now(JST).isoformat()
+        if updated_elem is not None:
+            assert updated is not None
+            updated_elem.text = updated.isoformat()
         content_elem.text = article.content
         draft_elem.text = "yes" if draft else "no"
+        if scheduled_elem is not None:
+            scheduled_elem.text = "yes" if scheduled else "no"
 
         return ET.tostring(root, encoding="unicode")
 
@@ -224,4 +255,47 @@ class HatenaPoster(BlogPoster):
             edit_url=edit_url,
             updated=_safe_find(root, "atom:updated", self.NS),
             edited=_safe_find(root, "app:edited", self.NS),
+            scheduled=_safe_find(root, "app:control/hatenablog:scheduled", self.NS) == "yes",
         )
+
+    async def _put(
+        self, member_uri: str, article: BlogArticle, *, draft: bool, updated: datetime | None, scheduled: bool | None
+    ) -> PostResult:
+        """公開・予約・下書きに戻すで共通の PUT（記事を丸ごと置き換える）。成功は 200。"""
+        xml_entry = self._build_entry(article, draft=draft, updated=updated, scheduled=scheduled)
+        auth = OAuth1Auth(
+            client_id=self.consumer_key,
+            client_secret=self.consumer_secret,
+            token=self.access_token,
+            token_secret=self.access_token_secret,
+            force_include_body=True,
+        )
+        headers = {"Content-Type": "application/xml; charset=utf-8"}
+        try:
+            if self._client is not None:
+                response = await self._client.put(member_uri, auth=auth, content=xml_entry, headers=headers)
+            else:
+                async with httpx2.AsyncClient(timeout=REQUEST_TIMEOUT_SECONDS) as client:
+                    response = await client.put(member_uri, auth=auth, content=xml_entry, headers=headers)
+        except httpx2.HTTPError as e:
+            raise RuntimeError(
+                f"はてなブログとの通信に失敗しました（{type(e).__name__}）。{UNKNOWN_RESULT_HINT}"
+            ) from e
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"はてなブログの更新に失敗しました（status={response.status_code}）: {response.text[:200]}"
+            )
+        try:
+            return self._parse_response(response.text)
+        except ET.ParseError as e:
+            raise RuntimeError(
+                f"はてなブログの応答を解釈できませんでした（{type(e).__name__}）。{UNKNOWN_RESULT_HINT}"
+            ) from e
+
+    async def publish(self, member_uri: str, article: BlogArticle, *, at: datetime | None) -> PostResult:
+        if at is None:
+            return await self._put(member_uri, article, draft=False, updated=datetime.now(JST), scheduled=False)
+        return await self._put(member_uri, article, draft=True, updated=at, scheduled=True)
+
+    async def unpublish(self, member_uri: str, article: BlogArticle) -> PostResult:
+        return await self._put(member_uri, article, draft=True, updated=None, scheduled=False)
