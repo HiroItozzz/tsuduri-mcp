@@ -490,6 +490,84 @@ def test_backup_before_migration_cleans_up_partial_file_on_failure(tmp_path, mon
     assert "移行の前のコピーに失敗しました" in caplog.text
 
 
+def _prepare_pending_migration(path, monkeypatch) -> int:
+    """最新の DB を path に作り、無害な版を1つ足して、移行が残っている状態にする。今の版を返す。"""
+    conn = connect(path)
+    ConversationStore(conn)
+    conn.close()
+    latest_version = len(MIGRATIONS)
+    monkeypatch.setattr(
+        store_module, "MIGRATIONS", [*MIGRATIONS, (latest_version + 1, ["CREATE TABLE extra_check (id INTEGER)"])]
+    )
+    return latest_version
+
+
+def test_backup_failure_keeps_the_original_error_when_cleanup_also_fails(tmp_path, monkeypatch):
+    path = tmp_path / "fail.db"
+    _prepare_pending_migration(path, monkeypatch)
+
+    def broken_unlink(self, missing_ok=False):
+        raise PermissionError("消せない（テスト用）")
+
+    monkeypatch.setattr(store_module.Path, "unlink", broken_unlink)
+    conn = sqlite3.connect(path, factory=_BrokenBackupConnection)
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="disk full"):
+            ConversationStore(conn)
+    finally:
+        conn.close()
+
+
+def test_backup_check_treats_db_file_name_literally(tmp_path, monkeypatch):
+    """DB のファイル名の [ ] を glob の記号として扱わない（a[1].db のコピーを a1.db のコピーと取り違えない）。"""
+    path = tmp_path / "a[1].db"
+    latest_version = _prepare_pending_migration(path, monkeypatch)
+    decoy = tmp_path / f"a1.db.v{latest_version}-20260101T000000Z.bak"
+    decoy.write_bytes(b"")
+
+    conn = connect(path)
+    try:
+        ConversationStore(conn)
+    finally:
+        conn.close()
+
+    own = [p for p in tmp_path.iterdir() if p.name.startswith(f"a[1].db.v{latest_version}-")]
+    assert len(own) == 1
+
+
+def test_backup_is_left_to_the_process_that_created_the_file_first(tmp_path, monkeypatch):
+    """同じ秒に別のプロセスが同じ名前のコピーを作り始めていたら、上書きせずに任せる。"""
+    path = tmp_path / "race.db"
+    latest_version = _prepare_pending_migration(path, monkeypatch)
+
+    real_datetime = store_module.datetime
+
+    class FixedDatetime:
+        @staticmethod
+        def now(tz=None):
+            return real_datetime(2026, 1, 1, tzinfo=tz)
+
+    monkeypatch.setattr(store_module, "datetime", FixedDatetime)
+    other = tmp_path / f"race.db.v{latest_version}-20260101T000000Z.bak"
+    original_iterdir = store_module.Path.iterdir
+
+    def iterdir_then_race(self):
+        entries = list(original_iterdir(self))  # 確かめた時点では、まだ同じ版のコピーはない
+        other.write_bytes(b"other process")  # その直後に別のプロセスが同じ名前で作った
+        return iter(entries)
+
+    monkeypatch.setattr(store_module.Path, "iterdir", iterdir_then_race)
+
+    conn = connect(path)
+    try:
+        ConversationStore(conn)
+
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == latest_version + 1
+    finally:
+        conn.close()
+    assert other.read_bytes() == b"other process"  # 別のプロセスのファイルを上書きしていない
+
+
 def test_migration_rereads_version_inside_transaction(tmp_path, monkeypatch):
     """コピーを取っているあいだに別の接続が移行を終えていたら、トランザクションの中で読み直して何もしない。"""
     path = tmp_path / "race.db"

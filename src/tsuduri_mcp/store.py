@@ -1,3 +1,4 @@
+import contextlib
 import json
 import logging
 import os
@@ -153,15 +154,22 @@ def _backup_before_migration(conn: sqlite3.Connection, current_version: int) -> 
     """移行を流す前に、ファイルの DB ならコピーを作る（元に戻す手順がなく、DB にしかないデータがあるため）。
 
     同じ版のコピーがもうあれば作らない。`:memory:` のときは何もしない。
+    コピー先は排他的に作り、作れたプロセスだけがコピーする（同じ秒に2つのプロセスが開いたとき）。
     """
     db_path = conn.execute("PRAGMA database_list").fetchone()[2]  # main は最初の行。列は (seq, name, file)
     if not db_path:
         return
     path = Path(db_path)
-    if any(path.parent.glob(f"{path.name}.v{current_version}-*.bak")):
+    prefix = f"{path.name}.v{current_version}-"
+    # glob だと DB のファイル名の [ や * が記号として解釈されるので、文字どおりに比べる
+    if any(p.name.startswith(prefix) and p.name.endswith(".bak") for p in path.parent.iterdir()):
         return
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    backup_path = path.with_name(f"{path.name}.v{current_version}-{timestamp}.bak")
+    backup_path = path.with_name(f"{prefix}{timestamp}.bak")
+    try:
+        backup_path.touch(exist_ok=False)
+    except FileExistsError:
+        return
     try:
         backup_conn = sqlite3.connect(backup_path)
         try:
@@ -169,8 +177,9 @@ def _backup_before_migration(conn: sqlite3.Connection, current_version: int) -> 
         finally:
             backup_conn.close()
     except BaseException:
-        backup_path.unlink(missing_ok=True)
         logger.error("移行の前のコピーに失敗しました: %s", backup_path)
+        with contextlib.suppress(OSError):  # 削除の失敗で元の例外を隠さない
+            backup_path.unlink(missing_ok=True)
         raise
     logger.warning("移行の前に DB をコピーしました: %s", backup_path)
 
