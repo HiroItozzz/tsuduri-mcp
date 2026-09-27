@@ -151,7 +151,8 @@ MIGRATIONS: list[tuple[int, str]] = [
 def _migrate(conn: sqlite3.Connection) -> None:
     """PRAGMA user_version を見て、今の版より新しい移行だけを順に実行する。SCHEMA を流したあとに呼ぶ。
 
-    新しい DB（版0）でも古い DB でも、同じ道筋で最新の版になる。1回の移行は1トランザクション。
+    新しい DB（版0）でも古い DB でも、同じ道筋で最新の版になる。
+    DDL と PRAGMA では sqlite3 が BEGIN を出さないので、`with conn:` があっても1トランザクションにはなっていない。
     """
     current = conn.execute("PRAGMA user_version").fetchone()[0]
     for version, sql in MIGRATIONS:
