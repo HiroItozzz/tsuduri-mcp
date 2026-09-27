@@ -22,6 +22,12 @@ Claude Code:
 claude mcp add tsuduri -- uv run --directory /path/to/tsuduri-mcp --env-file /path/to/tsuduri-mcp/.env tsuduri-mcp
 ```
 
+Windows（PowerShell）では、パスを Windows の形で書く。
+
+```powershell
+claude mcp add tsuduri -- uv run --directory C:\path\to\tsuduri-mcp --env-file C:\path\to\tsuduri-mcp\.env tsuduri-mcp
+```
+
 Claude デスクトップ（`claude_desktop_config.json`）:
 
 ```json
