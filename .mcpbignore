@@ -1,0 +1,13 @@
+.venv/
+.env
+.env*
+.git/
+.gitignore
+.pytest_cache/
+tests/
+docs/
+__pycache__/
+*.pyc
+uv.lock
+.python-version
+.claude/

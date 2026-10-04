@@ -263,6 +263,18 @@ MCP の prompt（クライアント自身に読ませて書かせるための指
 - Gemini を実際に呼んだときだけ、新しいテーブル `llm_calls(kind, conversation_uuid, model, input_tokens, output_tokens, cost_usd, created_at)` に1行記録する。`summaries` は作り直すと上書きされるので、累計には使わない
 - 要約・下書きの戻り値に「約 $0.0150」と出す。わからなければ「料金は不明」、保存済みを使ったときは今回の料金がかからないことを出す
 
+## パッケージ化（試しているところ）
+
+まだリリースしていない。手元の Claude デスクトップと ChatGPT で動かすために、2つの形を試している。
+
+- **MCPB**（Claude デスクトップ用）: `manifest.json` と `.mcpbignore`。サーバーは `uv run --directory <リポジトリ> --env-file <.env> tsuduri-mcp` で起動する。リポジトリと `.env` の絶対パスを書いているので、この PC でしか動かない。配るときは作り直す
+- **PyInstaller の one-dir**（ChatGPT 用）: `tsuduri.spec` と、その入口の `run_tsuduri.py`。ビルドは `uv run pyinstaller --clean -y tsuduri.spec`
+  - PyInstaller は import される `.py` しか拾わないので、`prompts/*.md` を `collect_data_files('tsuduri_mcp')` で入れる。入れ忘れると、要約・下書きで `prompts/summary.md` が見つからないエラーになった（2026-10-03）
+  - spec はコマンドの引数から作られる。コマンドでビルドすると spec が上書きされるので、オプションは spec に書き、spec でビルドする
+  - 動いているサーバー（`dist\tsuduri\tsuduri.exe`）があると `dist` を消せずにビルドが失敗する。先にクライアントを止める
+- `python -m tsuduri_mcp` でも起動できる（`__main__.py`）
+- ビルドでできるもの（`build/`・`dist/`・`*.mcpb`）は git に入れない。配るときは Releases に添付する
+
 ## 開発ツール
 
 ruff（リント・整形）と ty（型チェック）。`uv run ruff check . && uv run ruff format . && uv run ty check && uv run pytest`

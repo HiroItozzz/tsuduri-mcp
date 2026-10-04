@@ -1,0 +1,37 @@
+{
+  "manifest_version": "0.2",
+  "name": "tsuduri-mcp",
+  "display_name": "tsuduri",
+  "version": "0.0.2",
+  "description": "claude.ai の会話履歴を検索・要約し、ブログへの投稿までできる MCP サーバー",
+  "author": {
+    "name": "HiroItozzz"
+  },
+  "server": {
+    "type": "binary",
+    "entry_point": "uv",
+    "mcp_config": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--directory", "E:/Dev/Projects/tsuduri-mcp",
+        "--env-file", "E:/Dev/Projects/tsuduri-mcp/.env",
+        "tsuduri-mcp"
+      ]
+    }
+  },
+  "tools": [
+    { "name": "search_messages" },
+    { "name": "list_conversations" },
+    { "name": "get_messages" },
+    { "name": "export_conversation" },
+    { "name": "summarize_conversation" },
+    { "name": "draft_blog_post" },
+    { "name": "post_blog_article" },
+    { "name": "record_blog_post" },
+    { "name": "check_blog_posts" },
+    { "name": "publish_blog_post" },
+    { "name": "unpublish_blog_post" }
+  ],
+  "license": "MIT"
+}
