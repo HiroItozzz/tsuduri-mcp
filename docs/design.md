@@ -81,7 +81,7 @@ claude.ai の公式エクスポート（設定 → データのエクスポー�
 - `llm.py`: pydantic-ai 経由で Gemini を呼ぶ。`prompts/` の指示文（要約・ブログ）を読む
 - `blog.py`: ブログへの投稿（`BlogPoster` と `HatenaPoster`）
 - `log.py`: ファイルへのログ
-- `paths.py`: DB とログの既定の置き場所
+- `paths.py`: DB・ログ・書き出しの既定の置き場所
 
 SQLAlchemy は使わない。中心の FTS5（仮想テーブル、`MATCH`、トリガー）は SQLAlchemy でも生の SQL になり、表が2つで書き込みも取り込みの1か所だけなので、ORM の利点が小さいため。動的な WHERE は小さな `_Where` で組み立てている。
 
@@ -125,7 +125,10 @@ MCP の prompt（クライアント自身に読ませて書かせるための指
 - 検索結果のうち本線に入っていないメッセージには「本線外」と、その枝を読むための `through_index` を添える。`main_line_only=true` で本線だけに絞れる（再生成した似た答えが並ぶのを避ける）
 - 日付の引数はローカル時刻の `YYYY-MM-DD` か ISO 8601。`until` に日付だけを渡すと、その日を含む。表示もローカル時刻。DB の時刻はエクスポートのまま UTC（`…Z`）で、ローカル時刻との変換は日時ごとの実際の時差（夏時間を含む）で行う
 - 枝分かれした会話は、既定で1本の枝だけを扱う（下記）。`all_branches=true` なら全部の枝を index 順に並べ、直前以外のメッセージへの返信に「分岐」と表示する
-- `export_conversation` は、AI がファイルを読めるクライアント（Claude Code など）向け。書き出し先は一時ディレクトリの `tsuduri-mcp/<uuid>-to<最後の index>.md`（すべての枝なら `<uuid>-all.md`）。枝ごとにファイルを分け、別の枝の書き出しで上書きしない。uuid は DB に存在することを確かめてからファイル名に使う
+- `export_conversation` は、AI がファイルを読めるクライアント（Claude Code など）向け。書き出し先はホームの `Documents/tsuduri-mcp/<uuid>-to<最後の index>.md`（すべての枝なら `<uuid>-all.md`）。環境変数 `TSUDURI_EXPORT_DIR` で変えられる
+  - 以前は一時ディレクトリだった。人が開きやすく、OS の掃除で消えない場所に変えた（2026-10-03）
+  - ドキュメントの場所を OS に聞く（`platformdirs` など）のはやめた。Windows のドキュメントは OneDrive のフォルダーのバックアップで OneDrive の下に移されていることがあり（実機では `OneDrive\ドキュメント`）、そこに書くと会話の全文がクラウドに同期されるため。ホームの `Documents` は、移された PC ではエクスプローラーの「ドキュメント」とは別のフォルダーになるが、戻り値に絶対パスを書くので場所はわかる
+  - 枝ごとにファイルを分け、別の枝の書き出しで上書きしない。uuid は DB に存在することを確かめてからファイル名に使う
 - DB がないときは、取り込みのコマンドを案内するエラーにする
 - 想定内のエラー（ValueError・FileNotFoundError・RuntimeError）は、ツールの入口（`mcp_tool`）で `ToolError` に変える。mcp 2.x の MCPServer は `ToolError` 以外の例外を「Error executing tool <name>」だけにして文言を消すため。実地確認で、次の一手のヒント（「start=0 で…」など）が AI に届いていないことがわかった
 - サーバーの `instructions` に、ツールの使い分けを書いている

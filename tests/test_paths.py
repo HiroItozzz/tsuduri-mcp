@@ -1,6 +1,8 @@
 import logging
+from pathlib import Path
 
 from tsuduri_mcp import log
+from tsuduri_mcp.paths import export_dir
 from tsuduri_mcp.store import default_db_path
 
 
@@ -22,6 +24,19 @@ def test_tsuduri_db_overrides_default(tmp_path, monkeypatch):
     monkeypatch.setenv("TSUDURI_DB", str(tmp_path / "other.db"))
 
     assert default_db_path() == tmp_path / "other.db"
+
+
+def test_export_dir_is_under_home_documents(tmp_path, monkeypatch):
+    monkeypatch.delenv("TSUDURI_EXPORT_DIR", raising=False)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    assert export_dir() == tmp_path / "Documents" / "tsuduri-mcp"
+
+
+def test_tsuduri_export_dir_overrides_default(tmp_path, monkeypatch):
+    monkeypatch.setenv("TSUDURI_EXPORT_DIR", str(tmp_path / "out"))
+
+    assert export_dir() == tmp_path / "out"
 
 
 def test_log_is_in_user_data_dir(tmp_path, monkeypatch):

@@ -12,6 +12,7 @@ uv run tsuduri-import path/to/conversations-000.zip
 
 - 取り込み先は、ユーザーのデータ置き場の `tsuduri.db`（Linux は `~/.local/share/tsuduri-mcp/`、Windows は `%LOCALAPPDATA%\tsuduri-mcp\`）。環境変数 `TSUDURI_DB` か `--db` で変えられる
 - ログは同じ場所の `logs/tsuduri.log`（`TSUDURI_LOG` で変えられる）
+- `export_conversation` の書き出し先は、ホームの `Documents/tsuduri-mcp/`（OneDrive に移されたドキュメントではない）（`TSUDURI_EXPORT_DIR` で変えられる）
 - 何度取り込んでも重複しない。新しいエクスポートを取り込むと、続きのある会話が更新される
 
 ## MCP サーバーの登録

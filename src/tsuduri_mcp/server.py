@@ -2,13 +2,11 @@ import functools
 import hashlib
 import inspect
 import logging
-import tempfile
 import time
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from pathlib import Path
 from typing import Annotated, Any, Literal
 
 from mcp.server.mcpserver import MCPServer
@@ -16,7 +14,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import Field
 from pydantic_ai.models import Model
 
-from . import blog, lines, llm, log, render
+from . import blog, lines, llm, log, paths, render
 from .dates import now_db, since_to_db, until_to_db
 from .store import (
     ConversationInfo,
@@ -52,7 +50,6 @@ claude.ai の過去の会話履歴を検索・閲覧するサーバー。
 """
 
 MAX_LIMIT = 100
-EXPORT_DIR = Path(tempfile.gettempdir()) / "tsuduri-mcp"
 MAX_INPUT_CHARS = 600_000  # いちばん長い会話の本線でも約 36 万文字（2026-09 時点）
 MIN_MATERIAL_CHARS = 1000  # 下書きの材料（本文の合計）がこれ未満なら「材料が薄い」と注意する
 
@@ -315,10 +312,11 @@ def export_conversation(
         info = find_conversation(store, conversation_uuid)
         scope = load_scope(store, conversation_uuid, through_index, all_branches)
     text = render.render_markdown(info, scope, include_details)
-    EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+    directory = paths.export_dir()
+    directory.mkdir(parents=True, exist_ok=True)
     # 枝ごとにファイルを分け、書き出すたびに他の枝を上書きしないようにする
     suffix = "all" if all_branches else f"to{scope.messages[-1].seq if scope.messages else 0}"
-    path = EXPORT_DIR / f"{conversation_uuid}-{suffix}.md"
+    path = directory / f"{conversation_uuid}-{suffix}.md"
     path.write_text(text, encoding="utf-8")
     return f"{path} に書き出しました（{len(scope.messages)} 件、{len(text)} 文字、{text.count(chr(10))} 行）"
 

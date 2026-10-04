@@ -37,7 +37,7 @@ def db(tmp_path, monkeypatch):
     ConversationStore(conn).import_conversations(ClaudeExportSource(src).load())
     conn.close()
     monkeypatch.setenv("TSUDURI_DB", str(path))
-    monkeypatch.setattr(server, "EXPORT_DIR", tmp_path / "export")
+    monkeypatch.setenv("TSUDURI_EXPORT_DIR", str(tmp_path / "export"))
 
 
 def test_search_returns_conversation_and_index_with_excerpt():
