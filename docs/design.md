@@ -154,11 +154,16 @@ ChatGPT のエクスポート（設定 → データコントロール → デ�
 - 要約（`summary`）はエクスポートにないので空
 - 形式は `tsuduri-import --format chatgpt` で選ぶ。自動判定は、巨大な JSON を判定のために読み直すことになるので、まだしない
 
+### 取り込み元（`conversations.source`、版5）
+
+- 会話ごとに取り込み元のサービスを持つ（`claude` / `chatgpt`）。値は Source が決める（`Conversation.source`）。1つの会話が2つのサービスにまたがることはないので、メッセージには持たない
+- 取り込み済みの会話と同じ uuid で、取り込み元が違う会話が来たら、エラーで止める（取り込み全体が巻き戻る）。黙って上書きすると、別のサービスのメッセージが1つの会話に混ざるため。どちらの id も UUID なので、実際にはまず起きない
+- ツールでは、claude.ai 以外の会話にだけ、タイトルのあとに `［ChatGPT］` の印をつける（`list_conversations`・`search_messages`・`get_messages` の見出し）。会話の大半は claude.ai なので、全部に印をつけるとコンテキストを使うだけになるため。印がないものは claude.ai だと、サーバーの説明に書いている
+- 取り込み元での絞り込み（引数）は、使ってみて要るとわかってから足す
+
 後回し:
 
-- `conversations` の `source` 列（どのサービスの会話か）。ChatGPT の id も UUID なので、Claude と重なる心配はほぼない。ツールで出し分けたくなったら DB の版を上げて足す
 - `current_node`（画面で表示中の枝）を本線に使うか。Claude はこれがないので「いちばん新しいメッセージ」で本線を決めている。使うならサービスごとに本線の決め方が変わる
-- サーバーの `INSTRUCTIONS` とツールの説明の「claude.ai の過去の会話」
 
 ## 枝分かれ
 
@@ -263,6 +268,7 @@ ChatGPT のエクスポート（設定 → データコントロール → デ�
 - 版2: `messages(conversation_uuid, position)` に UNIQUE の索引を足した（実データのコピーで約 1 秒）
 - 版3: `messages.position` を `seq` に改名した。索引の定義の列名は SQLite が書き換える。索引の名前（`idx_messages_position`）は SQLite では変えられないので、そのまま
 - 版4: `posts(conversation_uuid)` に索引を足した（`list_conversations` の `post_count` が posts をここで絞るため）
+- 版5: `conversations.source`（取り込み元のサービス、`claude` / `chatgpt`）を足した。既定値 `'claude'` で既存の行が埋まる（それまでの取り込みはすべて claude.ai のエクスポート）
 
 ## 要約（LLM）
 
@@ -317,7 +323,7 @@ ruff（リント・整形）と ty（型チェック）。`uv run ruff check . &
 - エクスポート JSON の読み込みを pydantic のモデルで検証する（形式が増えたときに、どの項目がおかしいかをわかるようにする）
 - Gemini の会話も取り込む。今後（ChatGPT は骨組みがある。上の「ChatGPT の取り込み」）
   - 読み込みは `ConversationSource` の実装を足す。`sender` の値は Source の中で `human` / `assistant` にそろえる
-  - テーブルは分けず、`conversations` に `source` 列（`claude` / `chatgpt` / `gemini`）を足す案。分けると検索・全文検索の索引・本線・投稿の記録がサービスの数だけ要るため
+  - テーブルは分けず、`conversations.source`（版5）に `gemini` を足す。分けると検索・全文検索の索引・本線・投稿の記録がサービスの数だけ要るため
   - Gemini（Google Takeout）は会話のまとまりが取れるか、実物で確かめる
 - projects テーブル
 - thinking やツールの入出力も検索対象にするか（`raw_content` に残っている）

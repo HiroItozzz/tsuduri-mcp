@@ -59,12 +59,21 @@ def conversation_title(name: str, first_human_text: str = "") -> str:
     return UNTITLED
 
 
+SOURCE_LABELS = {"chatgpt": "ChatGPT"}
+
+
+def source_mark(source: str) -> str:
+    """claude.ai 以外から取り込んだ会話につける印。claude.ai の会話（大半）には何もつけない。"""
+    return f" ［{SOURCE_LABELS.get(source, source)}］" if source != "claude" else ""
+
+
 def render_search(page: Page[MessageHit], offset: int, max_chars: int, keywords: Sequence[str]) -> str:
     lines = [page_header(page.total, offset, len(page.items), "メッセージ")]
     for hit in page.items:
         heading = (
             f"\n--- conversation={hit.conversation_uuid} index={hit.seq} {hit.sender} "
             f"{db_to_local(hit.created_at)} 「{conversation_title(hit.conversation_name)}」"
+            f"{source_mark(hit.conversation_source)}"
         )
         if not hit.on_main_line:
             heading += f" ［本線外。through_index={hit.seq} でこの枝を読める］"
@@ -85,7 +94,7 @@ def render_conversation_list(page: Page[ConversationInfo], offset: int) -> str:
             else f"最終発言 なし（会話の更新 {db_to_local(c.last_message_at)}）"
         )
         lines.append(
-            f"- {c.uuid} | {conversation_title(c.name, c.first_human_text)} | "
+            f"- {c.uuid} | {conversation_title(c.name, c.first_human_text)}{source_mark(c.source)} | "
             f"作成 {db_to_local(c.created_at)} / {last} | {c.message_count} 件"
             + (" | メッセージなし" if not c.message_count else "")
             + (
@@ -143,7 +152,9 @@ def branch_note(pm: StoredMessage, scope: Scope) -> str:
 def render_messages(info: ConversationInfo, scope: Scope, start: int, count: int, max_chars: int | None) -> str:
     candidates = [pm for pm in scope.messages if pm.seq >= start]
     shown, rest = candidates[:count], candidates[count:]
-    lines = [f"「{conversation_title(info.name, info.first_human_text)}」 conversation={info.uuid}"]
+    lines = [
+        f"「{conversation_title(info.name, info.first_human_text)}」{source_mark(info.source)} conversation={info.uuid}"
+    ]
     lines.append(scope.describe(info))
     if not shown:
         lines.append(f"index={start} 以降のメッセージはありません。")

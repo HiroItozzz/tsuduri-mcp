@@ -22,4 +22,5 @@ class Conversation:
     summary: str
     created_at: str
     updated_at: str
+    source: str  # 取り込み元のサービス（"claude" / "chatgpt"）
     messages: list[Message] = field(default_factory=list)

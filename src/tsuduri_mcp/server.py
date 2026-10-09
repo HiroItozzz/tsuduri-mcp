@@ -31,7 +31,8 @@ from .store import (
 logger = logging.getLogger(f"{log.LOGGER_NAME}.server")
 
 INSTRUCTIONS = """\
-claude.ai の過去の会話履歴を検索・閲覧するサーバー。
+claude.ai（と ChatGPT）の過去の会話履歴を検索・閲覧するサーバー。
+- ChatGPT から取り込んだ会話には、タイトルのあとに ［ChatGPT］ と出る。印のない会話は claude.ai のもの
 - 話題から探すときは search_messages。当たったメッセージの conversation と index が返る
 - 期間で探すときは list_conversations（例: 先週の会話）
 - 前後の流れは get_messages で、index を指定して必要な範囲だけ読む
@@ -202,6 +203,7 @@ def search_messages(
     """過去の会話のメッセージを、本文のキーワードで検索する。
 
     当たったメッセージごとに、会話の uuid・メッセージの index・発言者・日時・会話のタイトルと本文を返す。
+    ChatGPT から取り込んだ会話には、タイトルのあとに ［ChatGPT］ と出る。
     本文は text の部分だけで、thinking やツールの入出力は含まない。
     keywords が空なら、条件に合うすべてのメッセージを返す（期間で眺めるときに使う）。
     """
@@ -237,6 +239,7 @@ def list_conversations(
 
     期間は「その期間に発言のあった会話」で絞る。期間より前に始まって期間中に続きを話した会話も含む。
     タイトルが空の会話は、最初の発言の冒頭を代わりに表示する。
+    ChatGPT から取り込んだ会話には、タイトルのあとに ［ChatGPT］ と出る。
     「本文なし」の会話は、エクスポートに本文が含まれていないので読んでも中身はない。
     「メッセージなし」の会話は、メッセージが1件もない（最終発言の代わりに会話の更新日時を出す）。
     """

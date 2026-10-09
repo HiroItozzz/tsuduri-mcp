@@ -17,6 +17,7 @@ from .paths import data_dir
 logger = logging.getLogger(f"{log.LOGGER_NAME}.store")
 
 SCHEMA = """
+-- source（取り込み元のサービス）は版5の移行で足した列。SCHEMA 自体はここでは変えない
 CREATE TABLE IF NOT EXISTS conversations (
     uuid       TEXT PRIMARY KEY,
     name       TEXT NOT NULL,
@@ -147,6 +148,8 @@ MIGRATIONS: list[tuple[int, list[str]]] = [
     (3, ["ALTER TABLE messages RENAME COLUMN position TO seq"]),
     # list_conversations の post_count が posts を conversation_uuid で絞るため
     (4, ["CREATE INDEX IF NOT EXISTS idx_posts_conversation ON posts(conversation_uuid)"]),
+    # 会話の取り込み元のサービス。それまでの会話はすべて claude.ai のエクスポートから入ったもの
+    (5, ["ALTER TABLE conversations ADD COLUMN source TEXT NOT NULL DEFAULT 'claude'"]),
 ]
 
 
@@ -228,6 +231,7 @@ class ImportResult:
 class MessageHit:
     conversation_uuid: str
     conversation_name: str
+    conversation_source: str
     seq: int
     sender: str
     created_at: str
@@ -240,6 +244,7 @@ class MessageHit:
 class ConversationInfo:
     uuid: str
     name: str
+    source: str  # 取り込み元のサービス（"claude" / "chatgpt"）
     created_at: str
     updated_at: str
     message_count: int
@@ -391,7 +396,15 @@ class ConversationStore:
         result = ImportResult()
         with self.conn:
             for conv in conversations:
-                row = self.conn.execute("SELECT updated_at FROM conversations WHERE uuid = ?", (conv.uuid,)).fetchone()
+                row = self.conn.execute(
+                    "SELECT updated_at, source FROM conversations WHERE uuid = ?", (conv.uuid,)
+                ).fetchone()
+                if row is not None and row["source"] != conv.source:
+                    # 黙って上書きすると、別のサービスの会話のメッセージが1つの会話に混ざるので止める
+                    raise ValueError(
+                        f"会話 {conv.uuid} は {row['source']} から取り込み済みで、"
+                        f"{conv.source} の会話と uuid が重なっています"
+                    )
                 if row is None:
                     result.added += 1
                     self._upsert_conversation(conv)
@@ -414,10 +427,11 @@ class ConversationStore:
 
     def _upsert_conversation(self, conv: Conversation) -> None:
         self.conn.execute(
-            """INSERT INTO conversations (uuid, name, summary, created_at, updated_at) VALUES (?, ?, ?, ?, ?)
+            """INSERT INTO conversations (uuid, name, summary, created_at, updated_at, source)
+               VALUES (?, ?, ?, ?, ?, ?)
                ON CONFLICT(uuid) DO UPDATE SET
                    name = excluded.name, summary = excluded.summary, updated_at = excluded.updated_at""",
-            (conv.uuid, conv.name, conv.summary, conv.created_at, conv.updated_at),
+            (conv.uuid, conv.name, conv.summary, conv.created_at, conv.updated_at, conv.source),
         )
 
     def _insert_messages(self, conv: Conversation) -> int:
@@ -558,7 +572,8 @@ class ConversationStore:
 
         total = self.conn.execute(f"SELECT count(*) FROM messages m WHERE {where.sql}", where.params).fetchone()[0]
         rows = self.conn.execute(
-            f"""SELECT m.conversation_uuid, c.name AS conversation_name, m.seq, m.sender, m.created_at, m.text,
+            f"""SELECT m.conversation_uuid, c.name AS conversation_name, c.source AS conversation_source,
+                       m.seq, m.sender, m.created_at, m.text,
                        ml.message_uuid IS NOT NULL AS on_main_line,
                        EXISTS (SELECT 1 FROM post_messages pm WHERE pm.message_uuid = m.uuid) AS posted
                 FROM messages m
@@ -599,7 +614,7 @@ class ConversationStore:
 
         total = self.conn.execute(f"SELECT count(*) FROM conversations c WHERE {where.sql}", where.params).fetchone()[0]
         rows = self.conn.execute(
-            f"""SELECT c.uuid, c.name, c.created_at, c.updated_at,
+            f"""SELECT c.uuid, c.name, c.source, c.created_at, c.updated_at,
                        (SELECT count(*) FROM messages m WHERE m.conversation_uuid = c.uuid) AS message_count,
                        (SELECT count(*) FROM messages m WHERE m.conversation_uuid = c.uuid AND m.text != '')
                            AS text_message_count,
@@ -865,7 +880,7 @@ class ConversationStore:
 
     def get_conversation(self, uuid: str) -> Conversation | None:
         row = self.conn.execute(
-            "SELECT uuid, name, summary, created_at, updated_at FROM conversations WHERE uuid = ?", (uuid,)
+            "SELECT uuid, name, summary, created_at, updated_at, source FROM conversations WHERE uuid = ?", (uuid,)
         ).fetchone()
         if row is None:
             return None

@@ -48,6 +48,7 @@ class ClaudeExportSource(ConversationSource):
             summary=raw.get("summary") or "",
             created_at=raw["created_at"],
             updated_at=raw["updated_at"],
+            source="claude",
             messages=[self._to_message(m) for m in raw.get("chat_messages") or []],
         )
 
@@ -101,6 +102,7 @@ class ChatGptExportSource(ConversationSource):
             summary="",
             created_at=created_at,
             updated_at=_iso_from_epoch(update_time) if update_time is not None else created_at,
+            source="chatgpt",
             messages=self._to_messages(raw.get("mapping") or {}, created_at),
         )
 

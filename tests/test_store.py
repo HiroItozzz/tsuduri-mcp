@@ -360,6 +360,25 @@ def test_migration_adds_member_uri_column_and_keeps_existing_rows(tmp_path):
         conn.close()
 
 
+def test_migration_marks_existing_conversations_as_claude(tmp_path):
+    path = tmp_path / "old.db"
+    conn = connect(path)
+    conn.executescript(SCHEMA)  # 版0の形（conversations に source 列がない）
+    conn.execute(
+        "INSERT INTO conversations (uuid, name, summary, created_at, updated_at) VALUES ('c1', '名前', '', 't', 't')"
+    )
+    conn.commit()
+    conn.close()
+
+    conn = connect(path)
+    try:
+        store = ConversationStore(conn)
+
+        assert store.conn.execute("SELECT source FROM conversations").fetchone()[0] == "claude"
+    finally:
+        conn.close()
+
+
 def test_duplicate_seq_in_a_conversation_is_rejected(store, tmp_path):
     import_raw(store, tmp_path, [two_turns()])
 
@@ -394,7 +413,7 @@ def test_migration_failure_rolls_back_everything(tmp_path, monkeypatch):
         with pytest.raises(sqlite3.OperationalError):
             ConversationStore(conn)
 
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 0  # 版1〜4もまとめて巻き戻る
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 0  # それまでの版もまとめて巻き戻る
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
         assert "dummy_migration_check" not in tables  # 正しい方の SQL の結果も残っていない
     finally:

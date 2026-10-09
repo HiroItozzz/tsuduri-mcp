@@ -1,10 +1,14 @@
 import json
 import zipfile
 
+import pytest
 from chatgpt_export import T0, gpt_conversation, gpt_message
 
-from tsuduri_mcp.sources import ChatGptExportSource
+from tsuduri_mcp import render
+from tsuduri_mcp.sources import ChatGptExportSource, ClaudeExportSource
 from tsuduri_mcp.store import ConversationStore, connect
+
+from claude_export import raw_conversation, raw_message
 
 
 def load(tmp_path, conversations):
@@ -131,3 +135,37 @@ def test_imported_branches_form_lines(tmp_path):
     assert [m.message.uuid for m in main.messages] == ["a", "b2"]
     assert [m.message.uuid for m in first.messages] == ["a", "b1"]
     assert main.leaf_count == 2
+
+
+def import_both(tmp_path, chatgpt_uuid="g1"):
+    """claude.ai の会話 c1 と ChatGPT の会話（uuid は chatgpt_uuid）を取り込んだ store を返す。"""
+    claude_path = tmp_path / "claude.json"
+    claude_path.write_text(json.dumps([raw_conversation("c1", [raw_message("m1", text="共通の話題")])]))
+    gpt_path = tmp_path / "chatgpt.json"
+    nodes = [("root", None, None), ("a", "root", gpt_message("a", text="共通の話題"))]
+    gpt_path.write_text(json.dumps([gpt_conversation(chatgpt_uuid, nodes)]))
+    store = ConversationStore(connect(":memory:"))
+    store.import_conversations(ClaudeExportSource(claude_path).load())
+    store.import_conversations(ChatGptExportSource(gpt_path).load())
+    return store
+
+
+def test_source_is_recorded_and_shown(tmp_path):
+    store = import_both(tmp_path)
+
+    sources = {c.uuid: c.source for c in store.list_conversations().items}
+    listing = render.render_conversation_list(store.list_conversations(), 0)
+    search = render.render_search(store.search_messages(["共通の話題"]), 0, 800, ["共通の話題"])
+
+    assert sources == {"c1": "claude", "g1": "chatgpt"}
+    assert [line for line in listing.splitlines() if "［ChatGPT］" in line] == [
+        next(line for line in listing.splitlines() if line.startswith("- g1 "))
+    ]
+    assert [line for line in search.splitlines() if "［ChatGPT］" in line] == [
+        next(line for line in search.splitlines() if "conversation=g1" in line)
+    ]
+
+
+def test_same_uuid_from_another_source_is_rejected(tmp_path):
+    with pytest.raises(ValueError, match="uuid が重なっています"):
+        import_both(tmp_path, chatgpt_uuid="c1")
