@@ -1,20 +1,24 @@
 import argparse
 from pathlib import Path
 
-from .sources import ClaudeExportSource
+from .sources import ChatGptExportSource, ClaudeExportSource
 from .store import ConversationStore, connect, default_db_path
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="claude.ai のエクスポートを SQLite に取り込む")
+    parser = argparse.ArgumentParser(description="claude.ai / ChatGPT のエクスポートを SQLite に取り込む")
     parser.add_argument("path", type=Path, help="conversations.json、またはそれを含む zip")
+    parser.add_argument(
+        "--format", choices=["claude", "chatgpt"], default="claude", help="エクスポートの形式（既定: claude）"
+    )
     parser.add_argument("--db", type=Path, default=None, help="取り込み先（既定: $TSUDURI_DB かデータ置き場）")
     args = parser.parse_args()
 
     db_path = args.db or default_db_path()
     conn = connect(db_path)
     try:
-        result = ConversationStore(conn).import_conversations(ClaudeExportSource(args.path).load())
+        source = ChatGptExportSource(args.path) if args.format == "chatgpt" else ClaudeExportSource(args.path)
+        result = ConversationStore(conn).import_conversations(source.load())
     finally:
         conn.close()
 

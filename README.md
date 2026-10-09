@@ -14,6 +14,7 @@ uv run tsuduri-import path/to/conversations-000.zip
 - ログは同じ場所の `logs/tsuduri.log`（`TSUDURI_LOG` で変えられる）
 - `export_conversation` の書き出し先は、ホームの `Documents/tsuduri-mcp/`（OneDrive に移されたドキュメントではない）（`TSUDURI_EXPORT_DIR` で変えられる）
 - 何度取り込んでも重複しない。新しいエクスポートを取り込むと、続きのある会話が更新される
+- ChatGPT のエクスポートは `--format chatgpt` をつける（試作。実物のエクスポートではまだ確かめていない）
 
 ## MCP サーバーの登録
 

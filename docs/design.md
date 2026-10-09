@@ -71,13 +71,13 @@ claude.ai の公式エクスポート（設定 → データのエクスポー�
 ### 構成
 
 - `models.py`: `Conversation` / `Message`（dataclass）。形式に依存しない
-- `sources.py`: `ConversationSource`（読み込みのインターフェース）と、その実装の `ClaudeExportSource`。claude.ai 形式の知識（キー名、ブロックの種類、ルートの親 uuid）はここに閉じ込める。`conversations.json` と、それを含む zip のどちらも読める
+- `sources.py`: `ConversationSource`（読み込みのインターフェース）と、その実装の `ClaudeExportSource` / `ChatGptExportSource`。各サービスの形式の知識（キー名、ブロックの種類、ルートの親 uuid）はここに閉じ込める。`conversations.json` と、それを含む zip のどちらも読める
 - `store.py`: `ConversationStore`。SQLite への書き込みと読み出し
 - `lines.py`: 枝（1本の線）の計算。線の選び方・枝の数・未投稿の始まり・範囲の検証。DB を使わないので、枝分かれのテストは DB なしで書ける
 - `dates.py`: ツールの引数（ローカル時刻）と DB（UTC）の日時の変換
 - `render.py`: ツールの戻り値のテキストを組み立てる
 - `server.py`: MCP ツールの定義
-- `importer.py`: `tsuduri-import` コマンド
+- `importer.py`: `tsuduri-import` コマンド。`--format chatgpt` で ChatGPT の形式を読む
 - `llm.py`: pydantic-ai 経由で Gemini を呼ぶ。`prompts/` の指示文（要約・ブログ）を読む
 - `blog.py`: ブログへの投稿（`BlogPoster` と `HatenaPoster`）
 - `log.py`: ファイルへのログ
@@ -132,6 +132,33 @@ MCP の prompt（クライアント自身に読ませて書かせるための指
 - DB がないときは、取り込みのコマンドを案内するエラーにする
 - 想定内のエラー（ValueError・FileNotFoundError・RuntimeError）は、ツールの入口（`mcp_tool`）で `ToolError` に変える。mcp 2.x の MCPServer は `ToolError` 以外の例外を「Error executing tool <name>」だけにして文言を消すため。実地確認で、次の一手のヒント（「start=0 で…」など）が AI に届いていないことがわかった
 - サーバーの `instructions` に、ツールの使い分けを書いている
+
+## ChatGPT の取り込み（骨組み、実物で未確認）
+
+ChatGPT のエクスポート（設定 → データコントロール → データをエクスポート）の `conversations.json` を `ChatGptExportSource` で読む。**形式は知識をもとに書いたもので、まだ実物で確かめていない**。実物が手に入ったら、下の前提を確かめて直す。
+
+前提にしている形式:
+
+- 会話: `id`（`conversation_id` も同じ値）、`title`、`create_time` / `update_time`（Unix 秒の小数）、`current_node`、`mapping`
+- `mapping` はノード id → `{id, message, parent, children}`。根のノードは `message` が `null`
+- message: `id`、`author.role`（`user` / `assistant` / `system` / `tool`）、`create_time` / `update_time`（`null` のこともある）、`content`（`content_type` と `parts` など）、`metadata`（`is_visually_hidden_from_conversation`、`attachments`）
+
+決めたこと:
+
+- 取り込むのは role が `user` / `assistant` で、隠しでないメッセージだけ。`user` は `human` にそろえる。根・`system`・`tool`・隠しメッセージは取り込まない
+- 取り込まないノードの子は、残る祖先につなぎ直す。そのままだと `parent_uuid` が DB にないメッセージを指し、線（`lines.py`）が途中で切れるため
+- assistant の `thoughts` や `code` など、テキスト以外の content_type もメッセージとしては残す。本文は空にして、`raw_content` に `content` を `[content]` の形でそのまま残す（Claude の thinking と同じ扱い）。実物で、推論モデルの1回の応答が複数の空の assistant メッセージに分かれてうるさいようなら見直す
+- 本文は、content_type が `text` / `multimodal_text` の `parts` のうち、文字列だけを `\n\n` でつなぐ（画像などは dict で混ざる）
+- 日時は DB の形（`2026-01-01T00:00:00.000000Z`）に直す。message の `create_time` が `null` なら親（残るメッセージ）の時刻、それもなければ会話の作成時刻を使う。`update_time` が `null` なら `create_time` と同じにする
+- メッセージの並び（seq の振り方）は時刻順。同じ時刻なら、根から深さ優先でたどった順
+- 要約（`summary`）はエクスポートにないので空
+- 形式は `tsuduri-import --format chatgpt` で選ぶ。自動判定は、巨大な JSON を判定のために読み直すことになるので、まだしない
+
+後回し:
+
+- `conversations` の `source` 列（どのサービスの会話か）。ChatGPT の id も UUID なので、Claude と重なる心配はほぼない。ツールで出し分けたくなったら DB の版を上げて足す
+- `current_node`（画面で表示中の枝）を本線に使うか。Claude はこれがないので「いちばん新しいメッセージ」で本線を決めている。使うならサービスごとに本線の決め方が変わる
+- サーバーの `INSTRUCTIONS` とツールの説明の「claude.ai の過去の会話」
 
 ## 枝分かれ
 
@@ -288,10 +315,9 @@ ruff（リント・整形）と ty（型チェック）。`uv run ruff check . &
 - DeepSeek / OpenAI（pydantic-ai ならモデル名を足すだけ）
 - 料金の累計を見るツール（`llm_calls` を集計する）。使ってみて必要なら
 - エクスポート JSON の読み込みを pydantic のモデルで検証する（形式が増えたときに、どの項目がおかしいかをわかるようにする）
-- Gemini / ChatGPT の会話も取り込む。今後
-  - 読み込みは `ConversationSource` の実装を足す（`ChatGptExportSource` など）。`sender` の値（ChatGPT は `user`）は Source の中で `human` にそろえる
+- Gemini の会話も取り込む。今後（ChatGPT は骨組みがある。上の「ChatGPT の取り込み」）
+  - 読み込みは `ConversationSource` の実装を足す。`sender` の値は Source の中で `human` / `assistant` にそろえる
   - テーブルは分けず、`conversations` に `source` 列（`claude` / `chatgpt` / `gemini`）を足す案。分けると検索・全文検索の索引・本線・投稿の記録がサービスの数だけ要るため
-  - claude.ai 決め打ちの残り: `importer.py`（形式の切り替えがない）、サーバーの `INSTRUCTIONS` とツールの説明（「claude.ai の過去の会話」）
-  - ChatGPT のエクスポートは `mapping` の親子で木になっていて、今の `parent_uuid` に乗る。`current_node`（画面で表示中の枝）もある。Gemini（Google Takeout）は会話のまとまりが取れるか、実物で確かめる
+  - Gemini（Google Takeout）は会話のまとまりが取れるか、実物で確かめる
 - projects テーブル
 - thinking やツールの入出力も検索対象にするか（`raw_content` に残っている）
