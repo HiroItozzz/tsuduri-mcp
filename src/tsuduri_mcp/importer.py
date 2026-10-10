@@ -7,7 +7,7 @@ from .store import ConversationStore, connect, default_db_path
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="claude.ai / ChatGPT のエクスポートを SQLite に取り込む")
-    parser.add_argument("path", type=Path, help="conversations.json、またはそれを含む zip")
+    parser.add_argument("path", type=Path, help="エクスポートの zip か JSON（chatgpt は展開したフォルダーも可）")
     parser.add_argument(
         "--format", choices=["claude", "chatgpt"], default="claude", help="エクスポートの形式（既定: claude）"
     )

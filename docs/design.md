@@ -133,26 +133,42 @@ MCP の prompt（クライアント自身に読ませて書かせるための指
 - 想定内のエラー（ValueError・FileNotFoundError・RuntimeError）は、ツールの入口（`mcp_tool`）で `ToolError` に変える。mcp 2.x の MCPServer は `ToolError` 以外の例外を「Error executing tool <name>」だけにして文言を消すため。実地確認で、次の一手のヒント（「start=0 で…」など）が AI に届いていないことがわかった
 - サーバーの `instructions` に、ツールの使い分けを書いている
 
-## ChatGPT の取り込み（骨組み、実物で未確認）
+## ChatGPT の取り込み
 
-ChatGPT のエクスポート（設定 → データコントロール → データをエクスポート）の `conversations.json` を `ChatGptExportSource` で読む。**形式は知識をもとに書いたもので、まだ実物で確かめていない**。実物が手に入ったら、下の前提を確かめて直す。
+ChatGPT のエクスポート（設定 → データコントロール → データをエクスポート）を `ChatGptExportSource` で読む。最初は知識をもとに形を決め、2026-10-10 に実物で確かめて直した。
 
-前提にしている形式:
+### 実物の形（2026-10-10 に受け取ったエクスポート）
 
-- 会話: `id`（`conversation_id` も同じ値）、`title`、`create_time` / `update_time`（Unix 秒の小数）、`current_node`、`mapping`
-- `mapping` はノード id → `{id, message, parent, children}`。根のノードは `message` が `null`
-- message: `id`、`author.role`（`user` / `assistant` / `system` / `tool`）、`create_time` / `update_time`（`null` のこともある）、`content`（`content_type` と `parts` など）、`metadata`（`is_visually_hidden_from_conversation`、`attachments`）
+受け取ったのは、会話のファイルだけを入れた zip。2023-01〜2026-06 の 618 会話・12,435 メッセージ（根を除くノード）。本文は見ず、キーと値の種類・件数だけを数えた。
 
-決めたこと:
+- 会話は `conversations-000.json`〜`conversations-006.json` に **100 会話ずつ分かれている**（`conversations.json` 1つではない）
+- 会話: `id`（`conversation_id` と同じ値）、`title`、`create_time` / `update_time`（Unix 秒の小数、`null` なし）、`current_node`、`mapping` ほか
+- `mapping` のノードは **`{id, message, parent}` だけで、`children` がない**。根は会話ごとに1つで `message` が `null`
+- message: `id`（ノードの id と同じ）、`author.role`、`create_time`（`null` が 2 件）、`content`、`metadata`（ないものが 349 件）。**`update_time` はない**
+- role は `user` と `assistant` だけ。`system` / `tool` / 隠しメッセージ（`is_visually_hidden_from_conversation`）は 1 件もなかった
+- content_type: `text`（11,805）、`thoughts`（317）、`reasoning_recap`（235）、`multimodal_text`（77）、`user_editable_context`（1、カスタム指示）
+- 推論の途中経過は、質問 → `thoughts`（1つ以上）→ `reasoning_recap` → 応答（`text`）と、assistant の1本道でつながる。途中で枝分かれした例はなかった。続きのない `thoughts` / `reasoning_recap` が 12 件（止めた応答と思われる）
+- `multimodal_text` の parts: 文字列のほか、画像（`image_asset_pointer`）・音声（`audio_asset_pointer` など）・音声の書き起こし（`audio_transcription`、`text` に本文）の dict
+- assistant の本文に、私用領域の文字（U+E200〜U+E206）の印が埋め込まれている。画面では引用のリンクなどに置き換わる
+  - `\ue200種類\ue202引数\ue202…\ue201` の形。種類は `cite`（約 1,250）・`filecite`・`i`・`link`（引数は `turn0search0` などの参照だけ）、`entity` / `product_entity`（引数は `["種類", "表示名", …]` の JSON）、`link_title` / `navlist` / `video`（最初の引数が題名）、`image_group` / `products`（JSON の設定）
+  - 引用された文の範囲は `\ue203…\ue204` で囲まれ、`\ue206` で終わる
+- 枝分かれのある会話は 146。`current_node` の線と、取り込んだ本線（いちばん新しいメッセージを通る線）が違う会話は 13
+- 応答の `create_time` が直前の質問より少し前（1 秒未満が 279 件、1 分未満が 35 件）のことがある
 
-- 取り込むのは role が `user` / `assistant` で、隠しでないメッセージだけ。`user` は `human` にそろえる。根・`system`・`tool`・隠しメッセージは取り込まない
+### 決めたこと
+
+- 読むファイルは、zip の中（または展開したフォルダー）の `conversations.json` と `conversations-数字.json` 全部。JSON のファイル1つを渡してもよい。ファイルごとに読み込む（全部を一度にメモリに載せない）
+- 子は `parent` から組み立てる。`children` は使わない
+- 取り込むのは role が `user` / `assistant` で、隠しでないメッセージだけ。`user` は `human` にそろえる。根・`system`・`tool`・隠しメッセージ・カスタム指示（`user_editable_context`）は取り込まない。実物には `system` などはなかったが、知識では入ることがあるので、扱いは残す
 - 取り込まないノードの子は、残る祖先につなぎ直す。そのままだと `parent_uuid` が DB にないメッセージを指し、線（`lines.py`）が途中で切れるため
-- assistant の `thoughts` や `code` など、テキスト以外の content_type もメッセージとしては残す。本文は空にして、`raw_content` に `content` を `[content]` の形でそのまま残す（Claude の thinking と同じ扱い）。実物で、推論モデルの1回の応答が複数の空の assistant メッセージに分かれてうるさいようなら見直す
-- 本文は、content_type が `text` / `multimodal_text` の `parts` のうち、文字列だけを `\n\n` でつなぐ（画像などは dict で混ざる）
-- 日時は DB の形（`2026-01-01T00:00:00.000000Z`）に直す。message の `create_time` が `null` なら親（残るメッセージ）の時刻、それもなければ会話の作成時刻を使う。`update_time` が `null` なら `create_time` と同じにする
-- メッセージの並び（seq の振り方）は時刻順。同じ時刻なら、根から深さ優先でたどった順
+- **推論の途中経過（`thoughts` / `reasoning_recap`）は、続く assistant の応答にまとめる**。応答の `raw_content` の先頭に、途中経過の `content` を順に入れる（Claude の thinking が応答と同じメッセージに入っているのと同じ形）。まとめないと、本文が空の assistant メッセージが応答ごとに2〜3件並ぶため（実物で 552 件）。続きがない・枝分かれしている・続きが assistant でないときは、まとめずに本文が空のメッセージとして残す
+- 本文は、content_type が `text` / `multimodal_text` の `parts` のうち、文字列と音声の書き起こし（`audio_transcription` の `text`）を `\n\n` でつなぐ。画像などは使わない
+- 本文からは印を取り除く。`entity` / `product_entity` は表示名に、`link_title` / `navlist` / `video` は題名に置き換え、ほかの印（引用など）は消す。範囲の区切り（`\ue203` など）は文字だけ消す。検索で `turn0search0` などが当たらないようにし、表示も読みやすくするため。元の文字列は `raw_content` に残る
+- 日時は DB の形（`2026-01-01T00:00:00.000000Z`）に直す。message の `create_time` が `null` なら親（残るメッセージ）の時刻、それもなければ会話の作成時刻を使う。`update_time` がなければ `create_time` と同じにする
+- メッセージの並び（seq の振り方）は時刻順。ただし、親の時刻より前には置かない（親より前の時刻の子は、親と同じ時刻として並べる）。同じ時刻なら、根から深さ優先でたどった順（親が先）。時刻だけで並べると、応答の seq が質問より前になる会話があったため（314 件）。保存する `created_at` は元の時刻のまま
 - 要約（`summary`）はエクスポートにないので空
 - 形式は `tsuduri-import --format chatgpt` で選ぶ。自動判定は、巨大な JSON を判定のために読み直すことになるので、まだしない
+- 実物を使い捨ての DB に取り込んで確かめた: 618 会話・11,899 メッセージ、約 10 秒。親が DB にないメッセージ 0、親より前の seq 0、本文に印が残ったもの 0。もう一度取り込んでも何も増えない
 
 ### 取り込み元（`conversations.source`、版5）
 
@@ -161,9 +177,10 @@ ChatGPT のエクスポート（設定 → データコントロール → デ�
 - ツールでは、claude.ai 以外の会話にだけ、タイトルのあとに `［ChatGPT］` の印をつける（`list_conversations`・`search_messages`・`get_messages` の見出し）。会話の大半は claude.ai なので、全部に印をつけるとコンテキストを使うだけになるため。印がないものは claude.ai だと、サーバーの説明に書いている
 - 取り込み元での絞り込み（引数）は、使ってみて要るとわかってから足す
 
-後回し:
+### 後回し
 
-- `current_node`（画面で表示中の枝）を本線に使うか。Claude はこれがないので「いちばん新しいメッセージ」で本線を決めている。使うならサービスごとに本線の決め方が変わる
+- `current_node`（画面で表示中の枝）を本線に使うか。Claude はこれがないので「いちばん新しいメッセージ」で本線を決めている。使うならサービスごとに本線の決め方が変わる。実物では、違う会話は 618 のうち 13
+- 画像・音声のファイル。受け取った zip には会話のファイルしかなかった
 
 ## 枝分かれ
 

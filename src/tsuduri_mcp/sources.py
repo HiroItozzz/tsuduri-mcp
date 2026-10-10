@@ -1,4 +1,5 @@
 import json
+import re
 import zipfile
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
@@ -74,24 +75,70 @@ def _iso_from_epoch(t: float) -> str:
     return datetime.fromtimestamp(t, UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
-class ChatGptExportSource(ConversationSource):
-    """ChatGPT のエクスポートの conversations.json（または それを含む zip）を読む。
+# ChatGPT の本文に埋め込まれている印（私用領域の文字）。画面では引用のリンクや強調に置き換わる
+_MARKER_SPAN = re.compile("\ue200([^\ue201]*)\ue201")  # \ue200 種類 \ue202 引数 \ue202 … \ue201
+_MARKER_CHAR = re.compile("[\ue200-\ue2ff]")  # 残りの区切り（引用された範囲を囲む \ue203〜\ue206 など）
 
-    実物のエクスポートではまだ確かめていない（docs/design.md の「ChatGPT の取り込み」）。
-    会話のメッセージは mapping（ノード id → ノード）の木になっている。user / assistant の
-    見えるメッセージだけを取り込み、落としたノード（根・system・tool・隠しメッセージ）の子は、
-    残る祖先につなぎ直す。
+
+def _replace_marker(match: re.Match[str]) -> str:
+    """印を、画面に出る文字に置き換える。引用（cite など）は画面では記号になるだけなので消す。"""
+    kind, *args = match.group(1).split("\ue202")
+    if kind in ("entity", "product_entity") and args:
+        # 引数は ["種類", "表示名", …] の JSON
+        try:
+            value = json.loads(args[0])
+        except ValueError:
+            return ""
+        return value[1] if isinstance(value, list) and len(value) > 1 and isinstance(value[1], str) else ""
+    if kind in ("link_title", "navlist", "video") and args:
+        return args[0]  # 最初の引数が表示される題名。残りは turn0search0 などの参照
+    return ""
+
+
+def _strip_markers(text: str) -> str:
+    return _MARKER_CHAR.sub("", _MARKER_SPAN.sub(_replace_marker, text))
+
+
+class ChatGptExportSource(ConversationSource):
+    """ChatGPT のエクスポートの conversations-000.json などを読む（docs/design.md の「ChatGPT の取り込み」）。
+
+    path はエクスポートの zip、それを展開したフォルダー、または JSON のファイル1つ。
+    会話のメッセージは mapping（ノード id → ノード）の木で、ノードは親（parent）だけを持つ。
+    user / assistant の見えるメッセージだけを取り込み、取り込まないノード（根・system・tool・
+    隠しメッセージ・カスタム指示）の子は、残る祖先につなぎ直す。
+    推論の途中経過（thoughts / reasoning_recap）は、続く assistant の応答の raw_content に入れて1つにまとめる。
     """
 
-    FILENAME = "conversations.json"
+    FILE_PATTERN = re.compile(r"conversations(-\d+)?\.json")  # 大きいエクスポートは 100 会話ずつに分かれる
     ROLES = {"user": "human", "assistant": "assistant"}
+    SKIPPED_CONTENT_TYPES = {"user_editable_context"}  # カスタム指示。発言ではない
+    REASONING_CONTENT_TYPES = {"thoughts", "reasoning_recap"}
 
     def __init__(self, path: Path):
         self.path = path
 
     def load(self) -> Iterator[Conversation]:
-        for raw in _read_export_json(self.path, self.FILENAME):
-            yield self._to_conversation(raw)
+        for data in self._read_files():
+            for raw in data:
+                yield self._to_conversation(raw)
+
+    def _read_files(self) -> Iterator[list[dict[str, Any]]]:
+        """会話の JSON をファイルごとに読む（全部を一度にメモリに載せないため）。"""
+        if self.path.suffix == ".zip":
+            with zipfile.ZipFile(self.path) as zf:
+                names = sorted(n for n in zf.namelist() if self.FILE_PATTERN.fullmatch(Path(n).name))
+                if not names:
+                    raise ValueError(f"conversations-000.json などが zip の中にありません: {self.path}")
+                for name in names:
+                    yield json.loads(zf.read(name))
+        elif self.path.is_dir():
+            paths = sorted(p for p in self.path.iterdir() if self.FILE_PATTERN.fullmatch(p.name))
+            if not paths:
+                raise ValueError(f"conversations-000.json などがフォルダーにありません: {self.path}")
+            for path in paths:
+                yield json.loads(path.read_text(encoding="utf-8"))
+        else:
+            yield json.loads(self.path.read_text(encoding="utf-8"))
 
     def _to_conversation(self, raw: dict[str, Any]) -> Conversation:
         created_at = _iso_from_epoch(raw["create_time"])
@@ -107,46 +154,95 @@ class ChatGptExportSource(ConversationSource):
         )
 
     def _to_messages(self, mapping: dict[str, Any], conv_created_at: str) -> list[Message]:
-        # 根から深さ優先でたどる。親は先に処理されるので、つなぎ先と時刻の補いがそのまま決まる
-        roots = [nid for nid, node in mapping.items() if node.get("parent") not in mapping]
-        stack: list[tuple[str, str | None, str]] = [(nid, None, conv_created_at) for nid in reversed(roots)]
-        messages: list[Message] = []
-        seen: set[str] = set()
-        while stack:
-            nid, parent, inherited_at = stack.pop()
-            if nid in seen or nid not in mapping:
-                continue
-            seen.add(nid)
-            node = mapping[nid]
-            message = self._to_message(node.get("message"), parent, inherited_at)
-            if message is not None:
-                messages.append(message)
-                parent, inherited_at = message.uuid, message.created_at
-            for child in reversed(node.get("children") or []):
-                stack.append((child, parent, inherited_at))
-        # seq はこの並びで振られる。時刻順にし、同じ時刻なら木の順を保つ（sorted は安定）
-        return sorted(messages, key=lambda m: m.created_at)
+        # 子は parent から組み立てる（ノードに children がないエクスポートがある）。親が mapping にないノードが根
+        children: dict[str | None, list[str]] = {}
+        for nid, node in mapping.items():
+            parent = node.get("parent")
+            children.setdefault(parent if parent in mapping else None, []).append(nid)
 
-    def _to_message(self, raw: dict[str, Any] | None, parent: str | None, inherited_at: str) -> Message | None:
+        # 根から深さ優先でたどる。親は先に処理されるので、つなぎ先と時刻の補いがそのまま決まる。
+        # carried は、まとめる途中の推論の content（続く応答の raw_content の先頭に入れる）。
+        # order_at は並べ替えに使う時刻で、親の order_at より前にならない（下記）
+        Item = tuple[str, str | None, str, list[dict[str, Any]]]
+        stack: list[Item] = [(nid, None, conv_created_at, []) for nid in reversed(children.get(None, []))]
+        ordered: list[tuple[str, Message]] = []
+        while stack:
+            nid, parent, parent_order_at, carried = stack.pop()
+            raw = mapping[nid].get("message")
+            kids = children.get(nid, [])
+            if self._folds_into_child(raw, kids, mapping):
+                stack.append((kids[0], parent, parent_order_at, [*carried, raw["content"]]))
+                continue
+            message = self._to_message(raw, parent, parent_order_at, carried)
+            if message is not None:
+                # 応答の時刻が直前の質問より少し（実データで最大1分）前のことがある。時刻だけで並べると
+                # 子の seq が親より前になるので、親より前には置かない
+                order_at = max(message.created_at, parent_order_at)
+                ordered.append((order_at, message))
+                parent, parent_order_at, carried = message.uuid, order_at, []
+            for child in reversed(kids):
+                stack.append((child, parent, parent_order_at, carried))
+        # seq はこの並びで振られる。時刻順にし、同じ時刻なら木の順（親が先）を保つ（sorted は安定）
+        return [m for _, m in sorted(ordered, key=lambda item: item[0])]
+
+    def _folds_into_child(self, raw: dict[str, Any] | None, kids: list[str], mapping: dict[str, Any]) -> bool:
+        """推論の途中経過で、続きが assistant の1本道なら、続きのメッセージにまとめる。
+
+        子がない（途中で止まった）・枝分かれしている・続きが assistant でないときは、まとめずに1件のメッセージにする。
+        """
+        if raw is None or self._role(raw) != "assistant" or len(kids) != 1:
+            return False
+        if (raw.get("content") or {}).get("content_type") not in self.REASONING_CONTENT_TYPES:
+            return False
+        child = mapping[kids[0]].get("message")
+        return child is not None and self._role(child) == "assistant"
+
+    @staticmethod
+    def _role(raw: dict[str, Any]) -> str | None:
+        return (raw.get("author") or {}).get("role")
+
+    def _to_message(
+        self, raw: dict[str, Any] | None, parent: str | None, fallback_at: str, carried: list[dict[str, Any]]
+    ) -> Message | None:
         if raw is None:
             return None
-        sender = self.ROLES.get((raw.get("author") or {}).get("role"))
+        sender = self.ROLES.get(self._role(raw) or "")
         metadata = raw.get("metadata") or {}
-        if sender is None or metadata.get("is_visually_hidden_from_conversation"):
-            return None
         content = raw.get("content") or {}
-        # parts には文字列のほか、画像などの dict が入る。本文には文字列だけを使う
-        is_text = content.get("content_type") in ("text", "multimodal_text")
-        parts = (content.get("parts") or []) if is_text else []
+        if (
+            sender is None
+            or metadata.get("is_visually_hidden_from_conversation")
+            or content.get("content_type") in self.SKIPPED_CONTENT_TYPES
+        ):
+            return None
         create_time, update_time = raw.get("create_time"), raw.get("update_time")
-        created_at = _iso_from_epoch(create_time) if create_time is not None else inherited_at
+        # 時刻がないときは親の時刻で補う
+        created_at = _iso_from_epoch(create_time) if create_time is not None else fallback_at
         return Message(
             uuid=raw["id"],
             sender=sender,
-            text="\n\n".join(p for p in parts if isinstance(p, str) and p),
+            text=self._text(content),
             created_at=created_at,
             updated_at=_iso_from_epoch(update_time) if update_time is not None else created_at,
             parent_uuid=parent,
-            raw_content=[content],
+            raw_content=[*carried, content],
             attachments=metadata.get("attachments") or [],
         )
+
+    @staticmethod
+    def _text(content: dict[str, Any]) -> str:
+        """text / multimodal_text の parts から本文を作る。
+
+        使うのは文字列と音声の書き起こしだけ（画像などは使わない）。文字列からは印を取り除く。
+        """
+        if content.get("content_type") not in ("text", "multimodal_text"):
+            return ""
+        pieces = []
+        for part in content.get("parts") or []:
+            if isinstance(part, str):
+                pieces.append(_strip_markers(part))
+            elif isinstance(part, dict) and part.get("content_type") == "audio_transcription":
+                text = part.get("text")
+                if isinstance(text, str):
+                    pieces.append(text)
+        return "\n\n".join(p for p in pieces if p)
